@@ -1,6 +1,6 @@
 # Duo Manager Fix
 
-Fixes for **Duo Manager 1.5.6** when used with [Apollo](https://github.com/SudoMaker/Apollo) (RTX GPU support) and [Moonlight](https://moonlight-stream.org/) game streaming.
+Fixes for **[Duo Manager 1.5.6](https://github.com/DuoStream/Duo/releases/tag/v1.5.6)** when used with [Apollo](https://github.com/SudoMaker/Apollo) (RTX GPU support) and [Moonlight](https://moonlight-stream.org/) game streaming.
 
 > **Tested with:** Duo Manager 1.5.6 · Apollo 0.4.6 (SudoMaker) · Windows 11 · RTX 5070
 
@@ -20,7 +20,7 @@ Fixes for **Duo Manager 1.5.6** when used with [Apollo](https://github.com/SudoM
 
 Install these **before** running the Duo Manager Fix installer:
 
-1. **Duo Manager 1.5.6** — installed to `C:\Program Files\Duo\` *(paste download link here)*
+1. **[Duo Manager 1.5.6](https://github.com/DuoStream/Duo/releases/tag/v1.5.6)** — installed to `C:\Program Files\Duo\`
 2. **[Apollo 0.4.6](https://github.com/SudoMaker/Apollo/releases/tag/0.4.6)** — installed to `C:\Program Files\Apollo\`
    - Required if you have an NVIDIA RTX GPU (Apollo finds it via DXGI/NVENC where the original sunshine.exe fails)
 3. **[ViGEmBus](https://github.com/nefarius/ViGEmBus/releases)** — virtual gamepad bus driver (1.21 or newer)

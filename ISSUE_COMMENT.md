@@ -1,7 +1,8 @@
 # Issue Comment — Duo Manager Fix
 
-> Post this as a comment on the relevant Duo Manager issue (or open a new one titled:
-> **"Fix for 640x480 resolution, broken web UI, and gamepad bleeding with Apollo on RTX GPUs"**)
+> Post this as a comment on a Duo Manager issue, or open a new one at:
+> https://github.com/DuoStream/Duo/issues
+> Suggested title: **"Fix for 640x480 resolution, broken web UI, and gamepad bleeding with Apollo on RTX GPUs"**
 
 ---
 
