@@ -1,6 +1,8 @@
 # Duo Manager Fix
 
-Fixes three bugs in **[Duo Manager 1.5.6](https://github.com/DuoStream/Duo/releases/tag/v1.5.6)** for NVIDIA RTX GPUs + [Moonlight](https://moonlight-stream.org/) streaming.
+Fixes four issues in **[Duo Manager 1.5.6](https://github.com/DuoStream/Duo/releases/tag/v1.5.6)** that appear on recent Windows 11 builds with NVIDIA RTX GPUs + [Moonlight](https://moonlight-stream.org/) streaming.
+
+> **Symptoms:** Moonlight shows the host as available but immediately fails to connect, session stuck at 640×480, management UI blank, or remote controller affecting the host PC's Steam.
 
 ---
 
@@ -22,26 +24,34 @@ That's it. No other software required.
 
 ## What it fixes
 
-### 1 — Resolution stuck at 640×480
+### 1 — Sunshine crashes and the streaming server never starts
 
-Duo Manager hardcodes `640 480` in the arguments it passes to its internal RDP component, regardless of what Moonlight requests.
+On recent Windows 11 builds, the `sunshine.exe` bundled with Duo Manager enters a crash/restart loop and never brings the streaming server online. Moonlight finds the host but immediately fails to connect.
 
-**Fix:** A wrapper intercepts those arguments and replaces any resolution below 4K with `3840×2160`. Apollo/Sunshine then dynamically downscales to whatever Moonlight actually asks for (1080p, 1440p, 4K — all work).
+On NVIDIA RTX GPUs this is compounded by the bundled binary also failing to detect the GPU via DXGI, so even when it does start it cannot encode.
 
-### 2 — Web management UI broken
+**Fix:** The installer replaces `sunshine.exe` with a version from [Apollo 0.4.6](https://github.com/SudoMaker/Apollo) — a maintained fork that starts cleanly on recent Windows 11 and uses NVENC HEVC encoding on RTX cards. No separate Apollo installation needed; it is bundled.
 
-The management page at `https://YOUR_PC:62203` shows a blank page or errors because Duo Manager ships with an outdated version of the streaming engine that is missing the assets required by the current UI.
+### 2 — Resolution stuck at 640×480
 
-**Fix:** The installer replaces the HTML and JavaScript files with the correct versions that match the streaming engine bundled in this package.
+Once the server is running, Moonlight connects but the session is always 640×480 regardless of what resolution Moonlight requests. Duo Manager hardcodes `640 480` in the arguments it passes to its internal RDP component every time.
 
-### 3 — Controller leaking into host Steam
+**Fix:** A wrapper intercepts those arguments and replaces any resolution below 4K with `3840×2160`. The streaming engine then dynamically downscales to whatever Moonlight actually asks for (1080p, 1440p, 4K — all work).
 
-When you connect a gamepad through Moonlight, your physical PC's Steam also detects that controller and reacts to it — because the virtual gamepad driver (ViGEmBus) creates devices globally, visible to all Windows sessions simultaneously.
+### 3 — Web management UI blank
+
+After the streaming engine is replaced, the management page at `https://YOUR_PC:62203` shows a blank page. This happens because Duo's bundled HTML files reference Vue.js assets from an older Sunshine version that are no longer present.
+
+**Fix:** The installer replaces the HTML and JavaScript files in Duo's web folder with the versions that match the streaming engine bundled in this package.
+
+### 4 — Remote controller leaking into host Steam
+
+When a gamepad is connected through Moonlight, the host PC's Steam also detects it and reacts — because ViGEmBus creates virtual devices globally, visible to all Windows sessions simultaneously. On recent Windows 11 builds this became noticeably more disruptive.
 
 **Fix:** A background Windows service (`DuoGamepadIsolator`) monitors for new virtual gamepad devices. When one appears, it:
 1. Identifies the physically logged-in user on the PC
 2. Applies a permission rule (DACL) that blocks only that user from accessing the device
-3. Forces a device reset so any handles Steam already had are closed
+3. Forces a device reset so any handles Steam already held are closed
 
 Result: the streaming session uses the controller normally; the host PC's Steam never sees it.
 
@@ -50,6 +60,9 @@ Result: the streaming session uses the controller normally; the host PC's Steam 
 ## Verifying the fix
 
 After connecting from Moonlight, check each fix:
+
+**Streaming server**
+Moonlight should connect successfully and show the Desktop or Steam Big Picture app.
 
 **Resolution**
 Open `C:\Users\Public\duordp_args.txt` — you should see:
@@ -100,6 +113,11 @@ Or use **Add/Remove Programs** → "Duo Manager Fix" (handles the service automa
 
 ## Troubleshooting
 
+**Moonlight fails to connect / black screen**
+- Check `C:\Program Files\Duo\config\Games.log` for encoder errors
+- Make sure your GPU drivers are up to date
+- Restart the Duo Manager service after installing
+
 **Controller still appears on host Steam**
 - Run `sc query DuoGamepadIsolator` — service must be `RUNNING`
 - The service must be running *before* you connect Moonlight
@@ -108,10 +126,6 @@ Or use **Add/Remove Programs** → "Duo Manager Fix" (handles the service automa
 **Web UI blank page**
 - Clear browser cache and retry
 - Check `C:\Program Files\Duo\assets\web\assets\` — should contain `.js` files
-
-**Black screen in Moonlight**
-- Check `C:\Program Files\Duo\config\Games.log` for encoder errors
-- Make sure your GPU drivers are up to date
 
 **Resolution still low**
 - If `C:\Users\Public\duordp_args.txt` doesn't exist, the wrapper isn't being called — reinstall
