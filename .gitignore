@@ -1,0 +1,5 @@
+bin/
+release/
+*.exe
+*.obj
+*.pdb
