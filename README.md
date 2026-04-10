@@ -1,92 +1,69 @@
 # Duo Manager Fix
 
-Fixes for **[Duo Manager 1.5.6](https://github.com/DuoStream/Duo/releases/tag/v1.5.6)** when used with [Apollo](https://github.com/SudoMaker/Apollo) (RTX GPU support) and [Moonlight](https://moonlight-stream.org/) game streaming.
-
-> **Tested with:** Duo Manager 1.5.6 · Apollo 0.4.6 (SudoMaker) · Windows 11 · RTX 5070
+Fixes three bugs in **[Duo Manager 1.5.6](https://github.com/DuoStream/Duo/releases/tag/v1.5.6)** for NVIDIA RTX GPUs + [Moonlight](https://moonlight-stream.org/) streaming.
 
 ---
 
-## Problems this fixes
+## Install
 
-| # | Problem | Fix |
-|---|---------|-----|
-| 1 | Duo Manager hardcodes **640×480** resolution for RDP sessions | `DuoRdpWrapper` intercepts the call and substitutes **3840×2160** |
-| 2 | Duo Manager's **web UI is broken** after replacing sunshine.exe with Apollo's | Apollo's Vue.js assets are copied to Duo's web folder |
-| 3 | Virtual gamepads (ViGEmBus DS4) created by Apollo/Moonlight **bleed into the host user's Steam** — the console user can see and be affected by the remote controller | `DuoGamepadIsolator` Windows service applies a DACL deny to the console user on every virtual HID device |
+**You need:**
+- [Duo Manager 1.5.6](https://github.com/DuoStream/Duo/releases/tag/v1.5.6) installed
+- [ViGEmBus](https://github.com/nefarius/ViGEmBus/releases/latest) installed (virtual gamepad driver)
 
----
+**Steps:**
+1. Install the two prerequisites above
+2. Download **[DuoManagerFix-Setup.exe](https://github.com/thiagorochasti/duo-manager-fix/releases/latest)** and run as Administrator
+3. Follow the wizard — it takes about 30 seconds
+4. Connect from Moonlight and play
 
-## Prerequisites
-
-Install these **before** running the Duo Manager Fix installer:
-
-1. **[Duo Manager 1.5.6](https://github.com/DuoStream/Duo/releases/tag/v1.5.6)** — installed to `C:\Program Files\Duo\`
-2. **[Apollo 0.4.6](https://github.com/SudoMaker/Apollo/releases/tag/0.4.6)** — installed to `C:\Program Files\Apollo\`
-   - Required if you have an NVIDIA RTX GPU (Apollo finds it via DXGI/NVENC where the original sunshine.exe fails)
-3. **[ViGEmBus](https://github.com/nefarius/ViGEmBus/releases)** — virtual gamepad bus driver (1.21 or newer)
-4. **[Moonlight](https://moonlight-stream.org/)** — game streaming client on any device
-5. **Windows 10/11** with **.NET Framework 4.x** (pre-installed on modern Windows)
-6. Admin rights on the host PC
+That's it. No other software required.
 
 ---
 
-## What gets installed
+## What it fixes
 
-| Component | Location | Purpose |
-|-----------|----------|---------|
-| `DuoRdpWrapper.exe` | `C:\Program Files\Duo\DuoRdp.exe` (replaces original) | Intercepts RDP resolution, forces 4K |
-| `DuoRdp_orig.exe` | `C:\Program Files\Duo\DuoRdp_orig.exe` | Backup of the original Duo binary |
-| `sunshine.exe` (Apollo) | `C:\Program Files\Duo\sunshine.exe` (replaces original) | RTX-capable GPU encoder |
-| Apollo web assets | `C:\Program Files\Duo\assets\web\` | Fixes broken management UI |
-| `DuoGamepadIsolator.exe` | `C:\Program Files\DuoFix\` | Gamepad isolation Windows service |
+### 1 — Resolution stuck at 640×480
+
+Duo Manager hardcodes `640 480` in the arguments it passes to its internal RDP component, regardless of what Moonlight requests.
+
+**Fix:** A wrapper intercepts those arguments and replaces any resolution below 4K with `3840×2160`. Apollo/Sunshine then dynamically downscales to whatever Moonlight actually asks for (1080p, 1440p, 4K — all work).
+
+### 2 — Web management UI broken
+
+The management page at `https://YOUR_PC:62203` shows a blank page or errors because Duo Manager ships with an outdated version of the streaming engine that is missing the assets required by the current UI.
+
+**Fix:** The installer replaces the HTML and JavaScript files with the correct versions that match the streaming engine bundled in this package.
+
+### 3 — Controller leaking into host Steam
+
+When you connect a gamepad through Moonlight, your physical PC's Steam also detects that controller and reacts to it — because the virtual gamepad driver (ViGEmBus) creates devices globally, visible to all Windows sessions simultaneously.
+
+**Fix:** A background Windows service (`DuoGamepadIsolator`) monitors for new virtual gamepad devices. When one appears, it:
+1. Identifies the physically logged-in user on the PC
+2. Applies a permission rule (DACL) that blocks only that user from accessing the device
+3. Forces a device reset so any handles Steam already had are closed
+
+Result: the streaming session uses the controller normally; the host PC's Steam never sees it.
 
 ---
 
-## Installation
+## Verifying the fix
 
-### Option A — Installer (recommended)
+After connecting from Moonlight, check each fix:
 
-1. Go to the [Releases](https://github.com/thiagorochasti/duo-manager-fix/releases) page and download `DuoManagerFix-Setup.exe`
-2. Right-click → **Run as Administrator**
-3. Follow the wizard (it will detect Duo Manager and Apollo automatically)
-4. Click **Finish** — the `DuoGamepadIsolator` service starts automatically
-
-### Option B — Manual (from source)
-
-```cmd
-:: 1. Clone the repo
-git clone https://github.com/thiagorochasti/duo-manager-fix.git
-cd duo-manager-fix
-
-:: 2. Build both binaries (requires .NET Framework 4.x — csc.exe)
-scripts\build.bat
-
-:: 3. Apply all fixes (run as Administrator)
-scripts\install.bat
+**Resolution**
+Open `C:\Users\Public\duordp_args.txt` — you should see:
+```
+=> Substituindo 640x480 por 3840x2160
 ```
 
----
+**Web UI**
+Open `https://YOUR_PC_IP:62203` in a browser → you should see the management page with Pair/Devices tabs.
 
-## Step-by-step verification
+**Gamepad isolation**
+On your PC, open Steam → Settings → Controller → the Moonlight controller should not appear. In the remote session, it works normally in games.
 
-After installation, verify each fix:
-
-### Fix 1 — Resolution
-1. Connect from Moonlight on any device
-2. Open `C:\Users\Public\duordp_args.txt`
-3. You should see lines like `=> Substituindo 640x480 por 3840x2160`
-
-### Fix 2 — Web UI
-1. Open `https://YOUR_HOST_IP:62203` in a browser (accept the self-signed cert)
-2. You should see the Apollo management page with Device Management / Pair tabs
-
-### Fix 3 — Gamepad isolation
-1. Connect a controller via Moonlight (e.g. from a phone or Steam Deck)
-2. On the **host PC**, open Steam → Big Picture → Controller Settings
-3. The remote controller should **not** appear there
-4. On the **remote session** (Games user), the controller should work normally in games
-
-Check the service log at `C:\Users\Public\duo_isolator.log` for:
+Check the service log at `C:\Users\Public\duo_isolator.log`:
 ```
 DACL OK (DENY console + ALLOW EVERYONE).
 Reciclo: Disable=0 Enable=0 OK
@@ -94,90 +71,75 @@ Reciclo: Disable=0 Enable=0 OK
 
 ---
 
-## Configuring Apollo
+## Pairing Moonlight
 
-After installation, you need to pair your Moonlight client:
+After installing:
 
-1. Open `https://YOUR_HOST_IP:62203`
+1. Open `https://YOUR_PC_IP:62203` in a browser
 2. Go to **Pin** and enter the PIN shown on your Moonlight client
-3. Add your apps under **Apps** (Desktop and Steam Big Picture are pre-configured)
-
-The Apollo config lives at `C:\Program Files\Duo\config\Games.conf`.  
-The app list is at `C:\Program Files\Duo\config\Games_apps.json`.
+3. Apps available: **Desktop** and **Steam Big Picture** (pre-configured)
 
 ---
 
 ## Uninstalling
 
-**To remove the gamepad isolator service only:**
+To remove everything this installer changed:
+
 ```cmd
+:: Remove the gamepad isolation service
 "C:\Program Files\DuoFix\DuoGamepadIsolator.exe" --uninstall
+
+:: Restore original Duo binaries
+copy /y "C:\Program Files\Duo\DuoRdp_orig.exe"    "C:\Program Files\Duo\DuoRdp.exe"
+copy /y "C:\Program Files\Duo\sunshine_orig.exe"   "C:\Program Files\Duo\sunshine.exe"
 ```
 
-**To restore original Duo binaries:**
-```cmd
-:: Restore original DuoRdp.exe
-copy /y "C:\Program Files\Duo\DuoRdp_orig.exe" "C:\Program Files\Duo\DuoRdp.exe"
-
-:: Restore original sunshine.exe (if you backed it up)
-:: copy /y "C:\Program Files\Duo\sunshine_orig.exe" "C:\Program Files\Duo\sunshine.exe"
-```
-
----
-
-## How it works (technical)
-
-### DuoRdpWrapper (resolution fix)
-
-`Duo.exe` always passes resolution arguments `640` `480` (positions 5 and 6) when launching `DuoRdp.exe`. The wrapper:
-- Intercepts those arguments before they reach the real `DuoRdp_orig.exe`
-- Replaces any resolution below 3840×2160 with `3840 2160`
-- Uses a **Windows Job Object** (`KILL_ON_JOB_CLOSE`) so the real RDP process dies if the wrapper is killed
-
-### DuoGamepadIsolator (gamepad isolation)
-
-ViGEmBus 1.21/1.22 creates virtual HID devices **globally** (no per-session isolation by design — the project is archived). Every Windows session sees every virtual controller.
-
-The service fixes this with a two-step approach:
-
-1. **DACL**: On every new virtual HID device arrival, it applies a protected DACL:
-   - `DENY GENERIC_ALL` → console session user (detected via `WTSGetActiveConsoleSessionId` + `WTSQuerySessionInformation`)
-   - `ALLOW GENERIC_ALL` → `EVERYONE` (covers RDP/streaming users, SYSTEM, etc.)
-
-2. **Handle invalidation**: After setting the DACL, it calls `CM_Disable_DevNode` + `CM_Enable_DevNode` on the device. This forces the OS to close all open handles — so even if Steam already grabbed a handle before the DACL was applied, it can't reopen one.
-
-**Zero-CPU idle**: uses `CM_Register_Notification` (kernel callback) instead of polling. Only activates on device events.
-
-**Edge cases handled:**
-- Service starts while a session is already active (initial scan)
-- Multiple HID interfaces per device (DS4 creates Col01–Col05): only one recycle cycle per device
-- Infinite recycle loop prevention: `_recycleUntil` timestamp ignores arrivals triggered by the disable/enable cycle itself
-- Console user changes between sessions (re-detected on each new device)
-- Polling fallback if `CM_Register_Notification` fails
+Or use **Add/Remove Programs** → "Duo Manager Fix" (handles the service automatically).
 
 ---
 
 ## Troubleshooting
 
-**Controller still visible on host Steam:**
-- Check `duo_isolator.log` — look for `DACL OK` entries
-- Ensure the service is running: `sc query DuoGamepadIsolator`
-- The service needs to be running **before** you connect Moonlight
+**Controller still appears on host Steam**
+- Run `sc query DuoGamepadIsolator` — service must be `RUNNING`
+- The service must be running *before* you connect Moonlight
+- Check `C:\Users\Public\duo_isolator.log` for errors
 
-**Web UI shows blank page:**
-- Check that Apollo web assets were copied: `dir "C:\Program Files\Duo\assets\web\assets\"`
-- Try clearing browser cache
+**Web UI blank page**
+- Clear browser cache and retry
+- Check `C:\Program Files\Duo\assets\web\assets\` — should contain `.js` files
 
-**Moonlight shows black screen:**
-- Check `C:\Program Files\Duo\config\Games.log` for Apollo encoder errors
-- Verify your GPU: `dxdiag` → Display tab
+**Black screen in Moonlight**
+- Check `C:\Program Files\Duo\config\Games.log` for encoder errors
+- Make sure your GPU drivers are up to date
 
-**Resolution is still low:**
-- Open `C:\Users\Public\duordp_args.txt` — if the file doesn't exist, DuoRdpWrapper isn't being called
-- Verify `C:\Program Files\Duo\DuoRdp.exe` is actually the wrapper (file size should be ~10 KB, not the original ~1 MB)
+**Resolution still low**
+- If `C:\Users\Public\duordp_args.txt` doesn't exist, the wrapper isn't being called — reinstall
+- Check that `C:\Program Files\Duo\DuoRdp.exe` is small (~10 KB); if it's large it's the original
+
+---
+
+## Building from source
+
+If you want to compile the installer yourself:
+
+```cmd
+:: 1. Clone
+git clone https://github.com/thiagorochasti/duo-manager-fix.git
+cd duo-manager-fix
+
+:: 2. Compile C# sources (requires .NET Framework 4.x)
+scripts\build.bat
+
+:: 3. Extract Apollo files needed by the installer
+::    (requires Apollo 0.4.6 installed at C:\Program Files\Apollo\)
+scripts\prepare_bundle.bat
+
+:: 4. Open installer\setup.iss in Inno Setup 6 and press F9
+```
 
 ---
 
 ## License
 
-MIT — do whatever you want with it. Pull requests welcome.
+MIT
