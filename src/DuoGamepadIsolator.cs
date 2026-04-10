@@ -429,13 +429,20 @@ class DuoGamepadIsolator : ServiceBase {
     void ProcessDevice(string devicePath, uint devInst, uint busDevInst) {
         SecurityIdentifier consoleSid = GetConsoleUserSid();
 
-        // Deduplicação por busDevInst: múltiplas interfaces HID (Col01, Col02...)
-        // do mesmo device virtual mapeiam para o mesmo busDevInst.
-        // Apenas a primeira interface aplica o reciclo; as outras só aplicam DACL.
+        // Deduplicação pelo parent direto do HID (1 nível acima do HID interface).
+        // Múltiplas interfaces HID do MESMO device virtual (Col01, Col02...) compartilham
+        // o mesmo parent direto — apenas a primeira dispara o reciclo.
+        // Devices virtuais DIFERENTES (ex: controle do usuário e do filho) têm parents
+        // distintos, então cada um recebe seu próprio reciclo corretamente.
+        // Nota: busDevInst (GetViGEmBusChild) pode ser um nó intermediário compartilhado
+        // por todos os devices virtuais — por isso não serve como chave de deduplicação.
+        uint directParent = devInst;
+        CM_Get_Parent(out directParent, devInst, 0);
+
         bool isFirstInterface;
         lock (_lock) {
-            isFirstInterface = !_devInstProcessed.Contains(busDevInst);
-            if (isFirstInterface) _devInstProcessed.Add(busDevInst);
+            isFirstInterface = !_devInstProcessed.Contains(directParent);
+            if (isFirstInterface) _devInstProcessed.Add(directParent);
         }
 
         Log("ViGEmBus device: " + devicePath +
