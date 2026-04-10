@@ -8,8 +8,8 @@
 
 #define AppName "Duo Manager Fix"
 #define AppVersion "1.0.0"
-#define AppPublisher "ThiagoRocha"
-#define AppURL "https://github.com/ThiagoRocha/duo-manager-fix"
+#define AppPublisher "thiagorochasti"
+#define AppURL "https://github.com/thiagorochasti/duo-manager-fix"
 #define ServiceName "DuoGamepadIsolator"
 #define DuoDir "C:\Program Files\Duo"
 #define ApolloDir "C:\Program Files\Apollo"

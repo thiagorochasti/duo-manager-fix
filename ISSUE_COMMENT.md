@@ -7,7 +7,7 @@
 
 Hey, I ran into several issues with Duo Manager 1.5.6 when pairing it with Apollo for RTX GPU support and Moonlight streaming. I ended up building a complete fix and have published it as an open-source tool:
 
-**→ https://github.com/ThiagoRocha/duo-manager-fix**
+**→ https://github.com/thiagorochasti/duo-manager-fix**
 
 Here's what it addresses:
 

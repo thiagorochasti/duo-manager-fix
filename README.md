@@ -20,7 +20,7 @@ Fixes for **Duo Manager 1.5.6** when used with [Apollo](https://github.com/SudoM
 
 Install these **before** running the Duo Manager Fix installer:
 
-1. **[Duo Manager 1.5.6](https://duomanager.com)** — installed to `C:\Program Files\Duo\`
+1. **Duo Manager 1.5.6** — installed to `C:\Program Files\Duo\` *(paste download link here)*
 2. **[Apollo 0.4.6](https://github.com/SudoMaker/Apollo/releases/tag/0.4.6)** — installed to `C:\Program Files\Apollo\`
    - Required if you have an NVIDIA RTX GPU (Apollo finds it via DXGI/NVENC where the original sunshine.exe fails)
 3. **[ViGEmBus](https://github.com/nefarius/ViGEmBus/releases)** — virtual gamepad bus driver (1.21 or newer)
@@ -46,7 +46,7 @@ Install these **before** running the Duo Manager Fix installer:
 
 ### Option A — Installer (recommended)
 
-1. Go to the [Releases](../../releases) page and download `DuoManagerFix-Setup.exe`
+1. Go to the [Releases](https://github.com/thiagorochasti/duo-manager-fix/releases) page and download `DuoManagerFix-Setup.exe`
 2. Right-click → **Run as Administrator**
 3. Follow the wizard (it will detect Duo Manager and Apollo automatically)
 4. Click **Finish** — the `DuoGamepadIsolator` service starts automatically
@@ -55,7 +55,7 @@ Install these **before** running the Duo Manager Fix installer:
 
 ```cmd
 :: 1. Clone the repo
-git clone https://github.com/YOUR_USERNAME/duo-manager-fix.git
+git clone https://github.com/thiagorochasti/duo-manager-fix.git
 cd duo-manager-fix
 
 :: 2. Build both binaries (requires .NET Framework 4.x — csc.exe)
