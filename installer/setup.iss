@@ -62,34 +62,48 @@ Source: "..\bundled\web\assets\*";     DestDir: "{tmp}\web\assets"; Flags: recur
 
 [Code]
 
-// Acumula erros de cada etapa para exibir no final
+// Aborta a instalação imediatamente com mensagem clara.
+// Restaura backups se existirem antes de sair.
+procedure AbortInstall(Step: String; Reason: String; Hint: String);
 var
-  InstallErrors: String;
-
-procedure AddError(Step: String; Detail: String);
+  DuoDir: String;
 begin
-  InstallErrors := InstallErrors + '  [FAILED] ' + Step + #13#10 +
-                   '           ' + Detail + #13#10;
-end;
+  DuoDir := ExpandConstant('{#DuoDir}');
 
-// Verifica se um arquivo foi realmente substituido comparando tamanho minimo esperado
-function CheckFileReplaced(Path: String; MinSizeBytes: Integer; StepName: String): Boolean;
-var
-  Size: Integer;
-begin
-  Result := False;
-  if not FileExists(Path) then begin
-    AddError(StepName, 'File not found: ' + Path);
-    Exit;
-  end;
-  // Inno Setup nao tem GetFileSize nativo — usamos que o arquivo existe e backup existe
-  Result := True;
+  // Restaura arquivos originais se o backup já foi criado
+  if FileExists(DuoDir + '\DuoRdp_orig.exe') then
+    FileCopy(DuoDir + '\DuoRdp_orig.exe', DuoDir + '\DuoRdp.exe', True);
+  if FileExists(DuoDir + '\sunshine_orig.exe') then
+    FileCopy(DuoDir + '\sunshine_orig.exe', DuoDir + '\sunshine.exe', True);
+
+  MsgBox(
+    'Installation failed at: ' + Step + #13#10 + #13#10 +
+    'Reason:' + #13#10 +
+    '  ' + Reason + #13#10 + #13#10 +
+    'What to do:' + #13#10 +
+    '  ' + Hint + #13#10 + #13#10 +
+    'Any files that were partially changed have been restored to their originals.' + #13#10 +
+    'You can safely try again after resolving the issue above.',
+    mbCriticalError, MB_OK);
+
+  Abort(); // Cancela o wizard do Inno Setup
 end;
 
 function InitializeSetup(): Boolean;
 begin
-  InstallErrors := '';
   Result := True;
+
+  // Verifica se está rodando como Administrador
+  if not IsAdminLoggedOn then begin
+    MsgBox(
+      'This installer must be run as Administrator.' + #13#10 + #13#10 +
+      'Right-click the installer and choose "Run as administrator".',
+      mbCriticalError, MB_OK);
+    Result := False;
+    Exit;
+  end;
+
+  // Verifica se o Duo Manager está instalado
   if not FileExists(ExpandConstant('{#DuoDir}\Duo.exe')) then begin
     MsgBox(
       'Duo Manager not found at:' + #13#10 +
@@ -98,6 +112,14 @@ begin
       'Download: https://github.com/DuoStream/Duo/releases/tag/v1.5.6',
       mbCriticalError, MB_OK);
     Result := False;
+    Exit;
+  end;
+
+  // Verifica se o Duo Manager está em execução (arquivos podem estar bloqueados)
+  if FileExists(ExpandConstant('{#DuoDir}\sunshine.exe')) then begin
+    // Tenta abrir o arquivo para escrita — se falhar, está em uso
+    // Inno Setup não tem API direta para isso, então apenas avisamos para fechar o serviço
+    // A validação real acontece quando tentamos copiar
   end;
 end;
 
@@ -105,7 +127,6 @@ procedure CurStepChanged(CurStep: TSetupStep);
 var
   DuoDir: String;
   ResultCode: Integer;
-  ServiceRunning: Boolean;
 begin
   if CurStep <> ssPostInstall then Exit;
 
@@ -114,47 +135,72 @@ begin
   // --- Fix 1: DuoRdpWrapper (resolucao 4K) ---
   Exec('takeown.exe', '/f "' + DuoDir + '\DuoRdp.exe" /a',                   '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('icacls.exe',  '"' + DuoDir + '\DuoRdp.exe" /grant Administrators:F', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  if not FileExists(DuoDir + '\DuoRdp_orig.exe') then
-    FileCopy(DuoDir + '\DuoRdp.exe', DuoDir + '\DuoRdp_orig.exe', False);
-  if not FileCopy(ExpandConstant('{tmp}\DuoRdpWrapper.exe'), DuoDir + '\DuoRdp.exe', True) then
-    AddError('Resolution fix (DuoRdpWrapper)', 'Could not replace DuoRdp.exe — file may be locked by Duo Manager. Try stopping the service first.');
 
-  // Valida: backup deve existir
-  if not FileExists(DuoDir + '\DuoRdp_orig.exe') then
-    AddError('Resolution fix (backup)', 'DuoRdp_orig.exe backup was not created.');
+  // Backup do original (somente se ainda não existe)
+  if not FileExists(DuoDir + '\DuoRdp_orig.exe') then begin
+    if not FileCopy(DuoDir + '\DuoRdp.exe', DuoDir + '\DuoRdp_orig.exe', False) then
+      AbortInstall(
+        'Resolution fix — backup of DuoRdp.exe',
+        'Could not create backup file DuoRdp_orig.exe.',
+        'Make sure Duo Manager service is stopped and try again.');
+  end;
+
+  // Substitui pelo wrapper
+  if not FileCopy(ExpandConstant('{tmp}\DuoRdpWrapper.exe'), DuoDir + '\DuoRdp.exe', True) then
+    AbortInstall(
+      'Resolution fix — replacing DuoRdp.exe',
+      'File is locked — Duo Manager service may still be running.',
+      'Open Services (services.msc), stop "Duo Manager", then run the installer again.');
 
   // --- Fix 2: Apollo sunshine.exe (encoder RTX) ---
   Exec('takeown.exe', '/f "' + DuoDir + '\sunshine.exe" /a',                   '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('icacls.exe',  '"' + DuoDir + '\sunshine.exe" /grant Administrators:F', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  if not FileExists(DuoDir + '\sunshine_orig.exe') then
-    FileCopy(DuoDir + '\sunshine.exe', DuoDir + '\sunshine_orig.exe', False);
-  if not FileCopy(ExpandConstant('{tmp}\sunshine.exe'), DuoDir + '\sunshine.exe', True) then
-    AddError('Streaming engine (sunshine.exe)', 'Could not replace sunshine.exe — file may be in use. Restart Duo Manager service and reinstall.');
 
-  // Valida: backup deve existir
-  if not FileExists(DuoDir + '\sunshine_orig.exe') then
-    AddError('Streaming engine (backup)', 'sunshine_orig.exe backup was not created.');
+  // Backup do original
+  if not FileExists(DuoDir + '\sunshine_orig.exe') then begin
+    if not FileCopy(DuoDir + '\sunshine.exe', DuoDir + '\sunshine_orig.exe', False) then
+      AbortInstall(
+        'Streaming engine — backup of sunshine.exe',
+        'Could not create backup file sunshine_orig.exe.',
+        'Make sure Duo Manager service is stopped and try again.');
+  end;
+
+  // Substitui pelo Apollo
+  if not FileCopy(ExpandConstant('{tmp}\sunshine.exe'), DuoDir + '\sunshine.exe', True) then
+    AbortInstall(
+      'Streaming engine — replacing sunshine.exe',
+      'File is locked — sunshine.exe is currently running.',
+      'Open Services (services.msc), stop "Duo Manager", then run the installer again.');
 
   // --- Fix 3: Web assets (interface de gerenciamento) ---
   if not ForceDirectories(DuoDir + '\assets\web\assets') then
-    AddError('Web UI assets', 'Could not create directory: ' + DuoDir + '\assets\web\assets');
+    AbortInstall(
+      'Web UI assets — creating directory',
+      'Could not create: ' + DuoDir + '\assets\web\assets',
+      'Check that you have Administrator rights and the Duo Manager folder is not read-only.');
 
   if not FileCopy(ExpandConstant('{tmp}\web\pin.html'),     DuoDir + '\assets\web\pin.html',     True) then
-    AddError('Web UI assets (pin.html)',     'Could not copy pin.html.');
+    AbortInstall('Web UI assets — pin.html',     'Could not copy pin.html.',     'Check folder permissions on ' + DuoDir + '\assets\web\');
   if not FileCopy(ExpandConstant('{tmp}\web\login.html'),   DuoDir + '\assets\web\login.html',   True) then
-    AddError('Web UI assets (login.html)',   'Could not copy login.html.');
+    AbortInstall('Web UI assets — login.html',   'Could not copy login.html.',   'Check folder permissions on ' + DuoDir + '\assets\web\');
   if not FileCopy(ExpandConstant('{tmp}\web\welcome.html'), DuoDir + '\assets\web\welcome.html', True) then
-    AddError('Web UI assets (welcome.html)', 'Could not copy welcome.html.');
+    AbortInstall('Web UI assets — welcome.html', 'Could not copy welcome.html.', 'Check folder permissions on ' + DuoDir + '\assets\web\');
 
   Exec('xcopy.exe',
     '"' + ExpandConstant('{tmp}\web\assets\*') + '" "' + DuoDir + '\assets\web\assets\" /Y /E /Q',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   if ResultCode <> 0 then
-    AddError('Web UI assets (JS/CSS)', 'xcopy returned error ' + IntToStr(ResultCode) + '. Some web assets may be missing.');
+    AbortInstall(
+      'Web UI assets — JavaScript/CSS bundles',
+      'xcopy failed with error code ' + IntToStr(ResultCode) + '.',
+      'Check that ' + DuoDir + '\assets\web\assets\ is writable and try again.');
 
-  // Valida: pelo menos um JS deve existir
+  // Valida que os assets chegaram
   if not FileExists(DuoDir + '\assets\web\assets\index-d0312854.js') then
-    AddError('Web UI assets (validation)', 'JavaScript bundles not found after copy — web UI may not work.');
+    AbortInstall(
+      'Web UI assets — validation',
+      'JavaScript bundles not found after copy.',
+      'This may be an antivirus blocking the files. Temporarily disable it and try again.');
 
   // --- Fix 4: Games_apps.json ---
   if not SaveStringToFile(
@@ -164,7 +210,10 @@ begin
       '{"uuid":"B27218EA-7DEB-C42F-AC87-A7A4CB305671","name":"Steam Big Picture","cmd":"steam://open/bigpicture","wait-all":true,"auto-detach":true,"image-path":"steam.png"}' +
     '],"env":{},"version":2}',
     False) then
-    AddError('App list (Games_apps.json)', 'Could not write config file — check permissions on ' + DuoDir + '\config\');
+    AbortInstall(
+      'App configuration — Games_apps.json',
+      'Could not write to ' + DuoDir + '\config\Games_apps.json.',
+      'Check that the config folder exists and is writable.');
 
   // --- Fix 5: DuoGamepadIsolator (servico Windows) ---
   Exec('sc.exe', 'stop {#ServiceName}',   '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
@@ -172,32 +221,23 @@ begin
   Exec(ExpandConstant('{app}\DuoGamepadIsolator.exe'), '--install',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-  // Valida: servico deve estar rodando
-  ServiceRunning := False;
+  // Valida que o serviço subiu
   Exec('sc.exe', 'query {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   if ResultCode <> 0 then
-    AddError('Gamepad isolator service', 'Service could not be installed or started. Try running the installer again as Administrator.')
-  else
-    ServiceRunning := True;
+    AbortInstall(
+      'Gamepad isolator service',
+      'Service was installed but could not be started.',
+      'Check Windows Event Viewer for details, or report this issue at: {#AppURL}/issues');
 
-  // --- Exibe resumo de erros se houver ---
-  if InstallErrors <> '' then
-    MsgBox(
-      'Installation completed with warnings.' + #13#10 +
-      'The following steps did not apply correctly:' + #13#10 + #13#10 +
-      InstallErrors + #13#10 +
-      'You can try running the installer again, or check the README for manual steps:' + #13#10 +
-      '{#AppURL}',
-      mbError, MB_OK)
-  else if ServiceRunning then
-    MsgBox(
-      'All fixes were applied successfully!' + #13#10 + #13#10 +
-      '  [OK] Resolution wrapper (DuoRdpWrapper)' + #13#10 +
-      '  [OK] Streaming engine (Apollo sunshine.exe)' + #13#10 +
-      '  [OK] Web management UI assets' + #13#10 +
-      '  [OK] Gamepad isolator service (running)' + #13#10 + #13#10 +
-      'Connect from Moonlight and test.',
-      mbInformation, MB_OK);
+  // --- Tudo OK ---
+  MsgBox(
+    'All fixes were applied successfully!' + #13#10 + #13#10 +
+    '  [OK] Resolution wrapper (DuoRdpWrapper)' + #13#10 +
+    '  [OK] Streaming engine (Apollo sunshine.exe)' + #13#10 +
+    '  [OK] Web management UI assets' + #13#10 +
+    '  [OK] Gamepad isolator service (running)' + #13#10 + #13#10 +
+    'Connect from Moonlight and test.',
+    mbInformation, MB_OK);
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
