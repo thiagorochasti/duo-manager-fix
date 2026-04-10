@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: "It worked! Share your setup"
+    url: https://github.com/thiagorochasti/duo-manager-fix/discussions
+    about: If the fix worked for you, let us know in Discussions — it helps others with similar setups.
+  - name: Installation guide
+    url: https://github.com/thiagorochasti/duo-manager-fix#readme
+    about: Read the README before opening an issue — most common problems are covered there.
