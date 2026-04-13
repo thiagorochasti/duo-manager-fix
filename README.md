@@ -36,10 +36,10 @@ On NVIDIA RTX GPUs this is compounded by the bundled binary also failing to dete
 
 Once the server is running, Moonlight connects but the session is always 640×480 regardless of what resolution Moonlight requests. Duo Manager hardcodes `640 480` in the arguments it passes to its internal RDP component every time.
 
-**Fix:** A wrapper intercepts those arguments and dynamically applies the correct resolution matching the client. It checks (in priority order):
-1. The resolution explicitly requested by Moonlight during the previous session (reading via `Games.log`).
-2. An explicit override in the Apollo `sunshine.conf` (`dd_manual_resolution`).
-3. A safe fallback to `1920×1080` to prevent overloading the host GPU unnecessarily (previously 4K was forced, tanking framerates).
+**Fix:** A wrapper intercepts those arguments and dynamically applies the correct resolution matching the client. Because Windows Remote Desktop locks resolution mid-session, the wrapper works predictively:
+1. It reads the resolution explicitly requested by Moonlight during your **previous session** (via `Games.log`).
+2. If none exists (or you just installed), it uses a safe fallback of `1920×1080` (preventing the previous 4K host overload bug).
+*(Note: To sync a brand new screen size, just connect once, close the stream, and connect again!)*
 
 ### 3 — Web management UI blank
 
@@ -143,7 +143,13 @@ Or use **Add/Remove Programs** → "Duo Manager Fix" (handles the service automa
 - Clear browser cache and retry
 - Check `C:\Program Files\Duo\assets\web\assets\` — should contain `.js` files
 
-**Resolution still low**
+**Resolution still low or not updating to my device immediately?**
+Here is exactly how the dynamic resolution logic works to bypass the RDP lock:
+1. **First Connection:** When you first install or connect, the virtual session launches *before* your device sends its preferred resolution. Thus, it safely falls back to `1920x1080`.
+2. **The "Delay":** Once your stream connects, Moonlight's requested resolution (e.g., 4K or 1440p) is logged in the background by Apollo.
+3. **Next Connection:** The next time you launch a session, our wrapper instantly reads that logged resolution and starts the virtual monitor precisely matched to your device. 
+*If you need to force a change immediately, simply connect, wait 10 seconds, end the stream, and connect again. The new session will adopt your new size.*
+
 - If `C:\Users\Public\duordp_args.txt` doesn't exist, the wrapper isn't being called — reinstall
 - Check that `C:\Program Files\Duo\DuoRdp.exe` is small (~10 KB); if it's large it's the original
 
