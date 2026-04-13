@@ -3,11 +3,15 @@ setlocal
 echo === Duo Manager Fix — Build Script ===
 echo.
 
-:: Encontrar csc.exe
+:: Encontrar csc.exe (path direto evita pegar WPF\pt-BR\csc.exe)
 set CSC=
-for /r "C:\Windows\Microsoft.NET\Framework64" %%f in (csc.exe) do set CSC=%%f
+if exist "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe" (
+    set "CSC=C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+) else if exist "C:\Windows\Microsoft.NET\Framework\v4.0.30319\csc.exe" (
+    set "CSC=C:\Windows\Microsoft.NET\Framework\v4.0.30319\csc.exe"
+)
 if "%CSC%"=="" (
-    echo ERRO: csc.exe nao encontrado. Instale o .NET Framework.
+    echo ERRO: csc.exe nao encontrado. Instale o .NET Framework 4.x.
     exit /b 1
 )
 echo Compilador: %CSC%
@@ -26,7 +30,8 @@ echo OK: DuoRdpWrapper.exe
 echo [2/2] Compilando DuoGamepadIsolator...
 "%CSC%" /out:..\bin\DuoGamepadIsolator.exe ..\src\DuoGamepadIsolator.cs ^
     /reference:System.ServiceProcess.dll ^
-    /reference:System.Security.dll
+    /reference:System.Security.dll ^
+    /platform:anycpu /optimize+
 if errorlevel 1 ( echo ERRO: DuoGamepadIsolator falhou. & exit /b 1 )
 echo OK: DuoGamepadIsolator.exe
 

@@ -36,7 +36,10 @@ On NVIDIA RTX GPUs this is compounded by the bundled binary also failing to dete
 
 Once the server is running, Moonlight connects but the session is always 640×480 regardless of what resolution Moonlight requests. Duo Manager hardcodes `640 480` in the arguments it passes to its internal RDP component every time.
 
-**Fix:** A wrapper intercepts those arguments and replaces any resolution below 4K with `3840×2160`. The streaming engine then dynamically downscales to whatever Moonlight actually asks for (1080p, 1440p, 4K — all work).
+**Fix:** A wrapper intercepts those arguments and dynamically applies the correct resolution matching the client. It checks (in priority order):
+1. The resolution explicitly requested by Moonlight during the previous session (reading via `Games.log`).
+2. An explicit override in the Apollo `sunshine.conf` (`dd_manual_resolution`).
+3. A safe fallback to `1920×1080` to prevent overloading the host GPU unnecessarily (previously 4K was forced, tanking framerates).
 
 ### 3 — Web management UI blank
 
@@ -65,10 +68,11 @@ After connecting from Moonlight, check each fix:
 Moonlight should connect successfully and show the Desktop or Steam Big Picture app.
 
 **Resolution**
-Open `C:\Users\Public\duordp_args.txt` — you should see:
+Open `C:\Users\Public\duordp_args.txt` — you should see a line confirming the fix:
 ```
-=> Substituindo 640x480 por 3840x2160
+=> Duo enviou 640x480 (bug). Substituindo por 2560x1440 [Moonlight (Games.log)]
 ```
+*(On your very first run ever, it may fall back safely to 1920x1080).*
 
 **Web UI**
 Open `https://YOUR_PC_IP:62203` in a browser → you should see the management page with Pair/Devices tabs.

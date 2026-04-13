@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 
 class DuoRdpWrapper {
 
@@ -50,14 +52,72 @@ class DuoRdpWrapper {
         public UIntPtr PeakJobMemoryUsed;
     }
 
+    // Lê a resolução solicitada pelo Moonlight diretamente do log do Apollo.
+    // O Apollo registra "clientViewportWd" e "clientViewportHt" no SDP durante o
+    // handshake RTSP — ANTES de invocar DuoRdp.exe. Isso garante que a resolução
+    // correta seja lida já na primeira conexão.
+    // Busca do fim para o início para pegar a sessão mais recente.
+    static bool TryReadMoonlightResolution(string duoDir, out int width, out int height) {
+        width = 0;
+        height = 0;
+        string logPath = Path.Combine(duoDir, "config", "Games.log");
+        if (!File.Exists(logPath)) return false;
+        try {
+            string[] lines = File.ReadAllLines(logPath);
+            int foundW = 0, foundH = 0;
+            for (int i = lines.Length - 1; i >= 0; i--) {
+                if (foundW == 0) {
+                    Match mw = Regex.Match(lines[i], @"clientViewportWd\s*:\s*(\d+)", RegexOptions.IgnoreCase);
+                    if (mw.Success) foundW = int.Parse(mw.Groups[1].Value);
+                }
+                if (foundH == 0) {
+                    Match mh = Regex.Match(lines[i], @"clientViewportHt\s*:\s*(\d+)", RegexOptions.IgnoreCase);
+                    if (mh.Success) foundH = int.Parse(mh.Groups[1].Value);
+                }
+                if (foundW > 0 && foundH > 0) {
+                    width  = foundW;
+                    height = foundH;
+                    return true;
+                }
+            }
+        } catch { }
+        return false;
+    }
+
+    // Lê dd_manual_resolution do sunshine.conf do Apollo (fallback secundário).
+    // Formato da linha: "dd_manual_resolution = 1920x1080" (ou sem espaços).
+    static bool TryReadApolloResolution(string duoDir, out int width, out int height) {
+        width = 0;
+        height = 0;
+        string confPath = Path.Combine(duoDir, "config", "sunshine.conf");
+        if (!File.Exists(confPath)) return false;
+        try {
+            foreach (string line in File.ReadAllLines(confPath)) {
+                string trimmed = line.Trim();
+                if (!trimmed.StartsWith("dd_manual_resolution", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                int eq = trimmed.IndexOf('=');
+                if (eq < 0) continue;
+                string val = trimmed.Substring(eq + 1).Trim();
+                Match m = Regex.Match(val, @"^(\d+)\s*[xX]\s*(\d+)$");
+                if (!m.Success) continue;
+                width  = int.Parse(m.Groups[1].Value);
+                height = int.Parse(m.Groups[2].Value);
+                return width > 0 && height > 0;
+            }
+        } catch { }
+        return false;
+    }
+
     static int Main(string[] args) {
-        string log = @"C:\Users\Public\duordp_args.txt";
+        string log    = @"C:\Users\Public\duordp_args.txt";
+        string duoDir = @"C:\Program Files\Duo";
+
         using (var sw = new StreamWriter(log, true)) {
             sw.WriteLine("=== DuoRdpWrapper invocado: " + DateTime.Now);
             sw.WriteLine("Args count: " + args.Length);
-            for (int i = 0; i < args.Length; i++) {
+            for (int i = 0; i < args.Length; i++)
                 sw.WriteLine("  [" + i + "] = " + args[i]);
-            }
         }
 
         string[] newArgs = (string[])args.Clone();
@@ -68,43 +128,72 @@ class DuoRdpWrapper {
             int.TryParse(args[5], out origWidth);
             int.TryParse(args[6], out origHeight);
 
-            if (origWidth < 3840 || origHeight < 2160) {
-                newArgs[5] = "3840";
-                newArgs[6] = "2160";
+            // Só intervém quando o Duo Manager envia a resolução quebrada (640x480).
+            // Qualquer outro valor é passado intacto — respeita o que o cliente pediu.
+            if (origWidth == 640 && origHeight == 480) {
+                int targetW = 1920;
+                int targetH = 1080;
+                string resSource;
+
+                // Prioridade 1: resolução real pedida pelo Moonlight (Games.log)
+                // Prioridade 2: resolução configurada no Apollo (sunshine.conf)
+                // Prioridade 3: fallback fixo 1920x1080
+                int rW, rH;
+                if (TryReadMoonlightResolution(duoDir, out rW, out rH)) {
+                    targetW   = rW;
+                    targetH   = rH;
+                    resSource = "Moonlight (Games.log)";
+                } else if (TryReadApolloResolution(duoDir, out rW, out rH)) {
+                    targetW   = rW;
+                    targetH   = rH;
+                    resSource = "Apollo config (dd_manual_resolution)";
+                } else {
+                    resSource = "fallback padrao 1920x1080";
+                }
+
+                newArgs[5] = targetW.ToString();
+                newArgs[6] = targetH.ToString();
+
                 using (var sw = new StreamWriter(log, true)) {
-                    sw.WriteLine("  => Substituindo " + origWidth + "x" + origHeight + " por 2560x1440");
+                    sw.WriteLine("  => Duo enviou 640x480 (bug). Substituindo por " +
+                                 targetW + "x" + targetH + " [" + resSource + "]");
+                }
+            } else {
+                using (var sw = new StreamWriter(log, true)) {
+                    sw.WriteLine("  => Resolucao recebida: " + origWidth + "x" + origHeight +
+                                 " — passando sem alteracao.");
                 }
             }
         }
 
-        string realExe = @"C:\Program Files\Duo\DuoRdp_orig.exe";
-        string quotedArgs = string.Join(" ", Array.ConvertAll(newArgs, delegate(string a) { return "\"" + a + "\""; }));
+        string realExe    = Path.Combine(duoDir, "DuoRdp_orig.exe");
+        string quotedArgs = string.Join(" ", Array.ConvertAll(newArgs,
+            delegate(string a) { return "\"" + a + "\""; }));
 
         using (var sw = new StreamWriter(log, true)) {
             sw.WriteLine("  => Chamando: " + realExe + " " + quotedArgs);
         }
 
-        // Criar Job Object para garantir que o filho morra junto com o wrapper
+        // Job Object garante que o processo filho morra junto com o wrapper.
         IntPtr hJob = CreateJobObject(IntPtr.Zero, null);
         if (hJob != IntPtr.Zero) {
             var info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
             info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            int size = Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
-            IntPtr pInfo = Marshal.AllocHGlobal(size);
-            Marshal.StructureToPtr(info, pInfo, false);
-            SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, pInfo, (uint)size);
-            Marshal.FreeHGlobal(pInfo);
+            int size   = Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
+            IntPtr ptr = Marshal.AllocHGlobal(size);
+            Marshal.StructureToPtr(info, ptr, false);
+            SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, ptr, (uint)size);
+            Marshal.FreeHGlobal(ptr);
         }
 
         var psi = new ProcessStartInfo();
-        psi.FileName = realExe;
-        psi.Arguments = quotedArgs;
+        psi.FileName        = realExe;
+        psi.Arguments       = quotedArgs;
         psi.UseShellExecute = false;
         var proc = Process.Start(psi);
 
-        if (hJob != IntPtr.Zero) {
+        if (hJob != IntPtr.Zero)
             AssignProcessToJobObject(hJob, proc.Handle);
-        }
 
         proc.WaitForExit();
         return proc.ExitCode;
