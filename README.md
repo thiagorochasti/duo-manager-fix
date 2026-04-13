@@ -58,6 +58,18 @@ When a gamepad is connected through Moonlight, the host PC's Steam also detects 
 
 Result: the streaming session uses the controller normally; the host PC's Steam never sees it.
 
+### 5 — Installer requires manual elevation
+
+Previously, installing the fix required manually right-clicking and selecting "Run as Administrator", which led to failed installations if forgotten.
+
+**Fix:** The installer now automatically requests Administrator privileges (UAC prompt) when double-clicked.
+
+### 6 — PIN Pairing requires host intervention
+
+When pairing a new Moonlight client, Apollo was failing to grant proper administrative permissions seamlessly, requiring the user to interact with the host PC.
+
+**Fix:** The pairing process via the web UI has been patched to automatically grant full permissions to the new client without any manual UAC intervention.
+
 ---
 
 ## Verifying the fix
