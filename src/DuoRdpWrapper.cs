@@ -52,11 +52,9 @@ class DuoRdpWrapper {
         public UIntPtr PeakJobMemoryUsed;
     }
 
-    // Lê a resolução solicitada pelo Moonlight diretamente do log do Apollo.
-    // O Apollo registra "clientViewportWd" e "clientViewportHt" no SDP durante o
-    // handshake RTSP — ANTES de invocar DuoRdp.exe. Isso garante que a resolução
-    // correta seja lida já na primeira conexão.
-    // Busca do fim para o início para pegar a sessão mais recente.
+    // Le a resolucao de streaming do Games.log (Sunshine/Apollo com min_log_level=info).
+    // O Sunshine registra "Desktop resolution [WxH]" antes de invocar DuoRdp.exe.
+    // Busca do fim para o inicio para pegar a sessao mais recente.
     static bool TryReadMoonlightResolution(string duoDir, out int width, out int height) {
         width = 0;
         height = 0;
@@ -64,20 +62,18 @@ class DuoRdpWrapper {
         if (!File.Exists(logPath)) return false;
         try {
             string[] lines = File.ReadAllLines(logPath);
-            int foundW = 0, foundH = 0;
+            // Padrao principal: "Desktop resolution [1920x1080]"
+            Regex reDesktop = new Regex(@"Desktop resolution \[(\d+)x(\d+)\]", RegexOptions.IgnoreCase);
             for (int i = lines.Length - 1; i >= 0; i--) {
-                if (foundW == 0) {
-                    Match mw = Regex.Match(lines[i], @"clientViewportWd\s*:\s*(\d+)", RegexOptions.IgnoreCase);
-                    if (mw.Success) foundW = int.Parse(mw.Groups[1].Value);
-                }
-                if (foundH == 0) {
-                    Match mh = Regex.Match(lines[i], @"clientViewportHt\s*:\s*(\d+)", RegexOptions.IgnoreCase);
-                    if (mh.Success) foundH = int.Parse(mh.Groups[1].Value);
-                }
-                if (foundW > 0 && foundH > 0) {
-                    width  = foundW;
-                    height = foundH;
-                    return true;
+                Match m = reDesktop.Match(lines[i]);
+                if (m.Success) {
+                    int w = int.Parse(m.Groups[1].Value);
+                    int h = int.Parse(m.Groups[2].Value);
+                    if (w > 0 && h > 0) {
+                        width  = w;
+                        height = h;
+                        return true;
+                    }
                 }
             }
         } catch { }
