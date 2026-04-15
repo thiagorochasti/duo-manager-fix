@@ -128,40 +128,39 @@ class DuoRdpWrapper {
             int.TryParse(args[5], out origWidth);
             int.TryParse(args[6], out origHeight);
 
-            // Só intervém quando o Duo Manager envia a resolução quebrada (640x480).
-            // Qualquer outro valor é passado intacto — respeita o que o cliente pediu.
-            if (origWidth == 640 && origHeight == 480) {
-                int targetW = 1920;
-                int targetH = 1080;
-                string resSource;
+            int targetW   = origWidth;
+            int targetH   = origHeight;
+            string resSource = null;
 
-                // Prioridade 1: resolução real pedida pelo Moonlight (Games.log)
-                // Prioridade 2: resolução configurada no Apollo (sunshine.conf)
-                // Prioridade 3: fallback fixo 1920x1080
-                int rW, rH;
-                if (TryReadMoonlightResolution(duoDir, out rW, out rH)) {
-                    targetW   = rW;
-                    targetH   = rH;
-                    resSource = "Moonlight (Games.log)";
-                } else if (TryReadApolloResolution(duoDir, out rW, out rH)) {
-                    targetW   = rW;
-                    targetH   = rH;
-                    resSource = "Apollo config (dd_manual_resolution)";
+            // Sempre tenta ler a resolução real negociada pelo Moonlight.
+            // Prioridade 1: clientViewportWd/Ht do Games.log (gravado pelo Apollo antes de invocar DuoRdp.exe)
+            // Prioridade 2: dd_manual_resolution do sunshine.conf
+            // Fallback: usa o que o Duo enviou (qualquer valor, incluindo 640x480 ou resolução do monitor físico)
+            int rW, rH;
+            if (TryReadMoonlightResolution(duoDir, out rW, out rH)) {
+                targetW   = rW;
+                targetH   = rH;
+                resSource = "Moonlight (Games.log)";
+            } else if (TryReadApolloResolution(duoDir, out rW, out rH)) {
+                targetW   = rW;
+                targetH   = rH;
+                resSource = "Apollo config (dd_manual_resolution)";
+            }
+
+            newArgs[5] = targetW.ToString();
+            newArgs[6] = targetH.ToString();
+
+            using (var sw = new StreamWriter(log, true)) {
+                if (resSource != null && (targetW != origWidth || targetH != origHeight)) {
+                    sw.WriteLine("  => Duo enviou " + origWidth + "x" + origHeight +
+                                 ". Substituindo por " + targetW + "x" + targetH +
+                                 " [" + resSource + "]");
+                } else if (resSource != null) {
+                    sw.WriteLine("  => Resolucao confirmada: " + targetW + "x" + targetH +
+                                 " [" + resSource + "] — coincide com o que Duo enviou.");
                 } else {
-                    resSource = "fallback padrao 1920x1080";
-                }
-
-                newArgs[5] = targetW.ToString();
-                newArgs[6] = targetH.ToString();
-
-                using (var sw = new StreamWriter(log, true)) {
-                    sw.WriteLine("  => Duo enviou 640x480 (bug). Substituindo por " +
-                                 targetW + "x" + targetH + " [" + resSource + "]");
-                }
-            } else {
-                using (var sw = new StreamWriter(log, true)) {
-                    sw.WriteLine("  => Resolucao recebida: " + origWidth + "x" + origHeight +
-                                 " — passando sem alteracao.");
+                    sw.WriteLine("  => Games.log nao encontrado. Usando resolucao do Duo: " +
+                                 origWidth + "x" + origHeight);
                 }
             }
         }
