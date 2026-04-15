@@ -106,8 +106,9 @@ class DuoRdpWrapper {
                     content = sr.ReadToEnd();
             }
             string[] lines = content.Split('\n');
-            // Padrão: "GET /launch?...mode=2560x1600x60..." (debug log do Sunshine)
-            Regex reLaunch = new Regex(@"/launch\?[^\s""]*mode=(\d+)x(\d+)x\d+",
+            // Padrão real do debug log do Sunshine: "Debug: mode -- 2560x1600x60"
+            // O parâmetro mode é logado individualmente após "DESTINATION :: /launch"
+            Regex reLaunch = new Regex(@"Debug:\s+mode\s+--\s+(\d+)x(\d+)x\d+",
                 RegexOptions.IgnoreCase);
             for (int i = lines.Length - 1; i >= 0; i--) {
                 Match m = reLaunch.Match(lines[i]);
