@@ -306,19 +306,18 @@ begin
 
 
   // ----------------------------------------------------------
-  // Fix 5: Games.conf — habilitar logging para resolucao automatica
-  // O wrapper le "Desktop resolution [WxH]" do Games.log para saber a
-  // resolucao que o Moonlight negociou. Requer min_log_level = info.
+  // Fix 5: Games.conf — habilitar debug logging para capturar resolucao do Moonlight
+  // O wrapper le "GET /launch?mode=WxHxFPS" do Games.log (nivel debug) para saber
+  // exatamente a resolucao que o Moonlight solicitou.
   // ----------------------------------------------------------
   if FileExists(DuoDir + '\config\Games.conf') then begin
     Exec('powershell.exe',
       '-NoProfile -Command "' +
       '$f = ''' + DuoDir + '\config\Games.conf''; ' +
       '$c = Get-Content $f -Raw; ' +
-      'if ($c -match ''min_log_level\s*=\s*none'') { ' +
-      '  $c = $c -replace ''min_log_level\s*=\s*none'', ''min_log_level = info''; ' +
-      '  $c | Set-Content $f -NoNewline; ' +
-      '}"',
+      '$c = $c -replace ''min_log_level\s*=\s*\w+'', ''min_log_level = debug''; ' +
+      '$c | Set-Content $f -NoNewline; ' +
+      '"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   end;
 

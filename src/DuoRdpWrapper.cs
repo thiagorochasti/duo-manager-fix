@@ -88,6 +88,39 @@ class DuoRdpWrapper {
         return int.TryParse(w, out width) && int.TryParse(h, out height) && width > 0 && height > 0;
     }
 
+    // Lê a resolução exata pedida pelo Moonlight do request HTTP GET /launch?mode=WxHxFPS
+    // gravado pelo Sunshine com min_log_level=debug. Lê só os últimos 512KB para não
+    // bloquear em logs grandes. Busca do fim para o início (sessão mais recente).
+    static bool TryReadMoonlightLaunchResolution(string duoDir, out int width, out int height) {
+        width  = 0;
+        height = 0;
+        string logPath = Path.Combine(duoDir, "config", "Games.log");
+        if (!File.Exists(logPath)) return false;
+        try {
+            const int maxBytes = 512 * 1024;
+            string content;
+            using (var fs = new FileStream(logPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) {
+                long start = Math.Max(0, fs.Length - maxBytes);
+                fs.Seek(start, SeekOrigin.Begin);
+                using (var sr = new StreamReader(fs))
+                    content = sr.ReadToEnd();
+            }
+            string[] lines = content.Split('\n');
+            // Padrão: "GET /launch?...mode=2560x1600x60..." (debug log do Sunshine)
+            Regex reLaunch = new Regex(@"/launch\?[^\s""]*mode=(\d+)x(\d+)x\d+",
+                RegexOptions.IgnoreCase);
+            for (int i = lines.Length - 1; i >= 0; i--) {
+                Match m = reLaunch.Match(lines[i]);
+                if (m.Success) {
+                    int w = int.Parse(m.Groups[1].Value);
+                    int h = int.Parse(m.Groups[2].Value);
+                    if (w > 0 && h > 0) { width = w; height = h; return true; }
+                }
+            }
+        } catch { }
+        return false;
+    }
+
     // Le a resolucao de streaming do Games.log (Sunshine/Apollo com min_log_level=info).
     // O Sunshine registra "Desktop resolution [WxH]" antes de invocar DuoRdp.exe.
     // Busca do fim para o inicio para pegar a sessao mais recente.
@@ -164,20 +197,25 @@ class DuoRdpWrapper {
             int targetH   = origHeight;
             string resSource = null;
 
-            // Prioridade 1: duo_wrapper.conf (override manual do usuário)
-            // Prioridade 2: env vars SUNSHINE_CLIENT_WIDTH/HEIGHT (não injetadas pelo Duo fork — reservado para futuro)
-            // Prioridade 3: Desktop resolution do Games.log (resolução do RDP virtual display)
-            // Prioridade 4: dd_manual_resolution do sunshine.conf (Apollo config estático)
+            // Prioridade 1: GET /launch?mode= do debug log (resolução EXATA do Moonlight)
+            // Prioridade 2: env vars SUNSHINE_CLIENT_WIDTH/HEIGHT (reservado para futuro)
+            // Prioridade 3: duo_wrapper.conf (override manual — fallback se log indisponível)
+            // Prioridade 4: Desktop resolution do Games.log (resolução do RDP virtual display)
+            // Prioridade 5: dd_manual_resolution do sunshine.conf (Apollo config estático)
             // Fallback: usa o que o Duo enviou
             int rW, rH;
-            if (TryReadWrapperConfig(duoDir, out rW, out rH)) {
+            if (TryReadMoonlightLaunchResolution(duoDir, out rW, out rH)) {
                 targetW   = rW;
                 targetH   = rH;
-                resSource = "duo_wrapper.conf (custom)";
+                resSource = "Moonlight (GET /launch mode=)";
             } else if (TryReadSunshineEnvResolution(out rW, out rH)) {
                 targetW   = rW;
                 targetH   = rH;
                 resSource = "Sunshine env (SUNSHINE_CLIENT_WIDTH/HEIGHT)";
+            } else if (TryReadWrapperConfig(duoDir, out rW, out rH)) {
+                targetW   = rW;
+                targetH   = rH;
+                resSource = "duo_wrapper.conf (custom)";
             } else if (TryReadMoonlightResolution(duoDir, out rW, out rH)) {
                 targetW   = rW;
                 targetH   = rH;
