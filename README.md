@@ -20,24 +20,22 @@ The ultimate community patch for **[Duo Manager 1.5.6](https://github.com/DuoStr
 ## What it fixes
 
 ### 1 — Streaming server crashes (Apollo Engine)
-On recent Windows 11 builds, the original `sunshine.exe` bundled with Duo Manager often enters a crash loop. 
-**Fix:** The installer replaces it with a specialized version from **Apollo 0.4.6**, ensuring stable connections and proper NVENC encoding on RTX cards.
+On recent Windows 11 builds, the original `sunshine.exe` bundled with Duo Manager often enters a crash loop.\n**Fix:** The installer replaces it with a specialized version from **Apollo 0.4.6**, ensuring stable connections and proper NVENC encoding on RTX cards.
 
 ### 2 — Resolution stuck at 640×480
 Duo Manager hardcodes `640 480` into its internal RDP component, ignores Moonlight's requested resolution.
-**Fix:** Our **DuoRdpWrapper** intercepts these arguments and intelligently matches your client's screen size. 
+**Fix:** Our **DuoRdpWrapper** intercepts these arguments and intelligently matches your client's screen size.
 *   **Predictive Match:** It reads your previous session's resolution from `Games.log`.
 *   **Safe Start:** New installs default to `1920x1080` (fixing the old "4K host lock" bug).
 *   *Note: To sync a new screen size, simply connect once, close the stream, and reconnect.*
 
 ### 3 — Web management UI blank
-The management page (`https://YOUR_PC:62203`) often appears blank because of outdated Vue.js assets. 
-**Fix:** The installer replaces the web assets with up-to-date files matching the engine you selected.
+The management page (`https://YOUR_PC:62203`) often appears blank because of outdated Vue.js assets.\n**Fix:** The installer replaces the web assets with up-to-date files matching the engine you selected.
 
 ### 4 — Dual Engine Support
 During installation, you can choose:
 *   **Apollo 0.4.6:** Recommended for 99% of users. Solid stability and performance.
-*   **Sunshine Native:** Best for users testing new HID features or specific controller drivers.
+*   **Sunshine Native:** Best for users testing new HID features or specific controller drivers. The installer copies all required files (sunshine.exe, zlib1.dll, assets, scripts, tools) automatically — no manual file copying needed.
 
 ### 5 — Auto-Admin Installer
 No more "Run as Administrator" right-click requirement. The installer handles elevation automatically to ensure every patch is applied correctly.
@@ -55,7 +53,7 @@ After connecting from Moonlight:
 Moonlight connects successfully and displays the Desktop or Steam Big Picture.
 
 **Resolution**
-Check `C:\Users\Public\duordp_args.txt` for the log line:
+Check `C:\\Users\\Public\\duordp_args.txt` for the log line:
 ```
 => Duo sent 640x480 (bug). Replacing with 2560x1440 [Moonlight (Games.log)]
 ```
@@ -67,11 +65,21 @@ Visit `https://YOUR_PC_IP:62203` — the management page should be fully functio
 
 ## Troubleshooting
 
+**Apps open on the host desktop instead of the remote session?**
+Enable these two options in Duo Manager → **Patch Settings**:
+- ✅ Enable Process Patching
+- ✅ Targeted Applications → All
+
+This routes app launches to the correct RDP session automatically.
+
 **Resolution still low on first connection?**
 RDP locks resolution mid-session. Simply connect, wait for the desktop to load, end the session, and connect again. The wrapper will now have "learned" your resolution and will apply it instantly.
 
+**Controller isolation (HidHide / ds4windows)?**
+Use the **Isolate HID Devices** option built into Duo Manager directly. The `DuoGamepadIsolator` service from older versions (v1.0.4/v1.0.5) has been removed — the installer will clean it up automatically if present.
+
 **Moonlight fails to connect / Black screen**
-- Check `C:\Program Files\Duo\config\Games.log` for encoder errors.
+- Check `C:\\Program Files\\Duo\\config\\Games.log` for encoder errors.
 - Ensure GPU drivers are current.
 - Restart the "Duo Manager" service in `services.msc`.
 
@@ -80,9 +88,9 @@ RDP locks resolution mid-session. Simply connect, wait for the desktop to load, 
 ## Building from source
 
 1.  `git clone https://github.com/thiagorochasti/duo-manager-fix.git`
-2.  Run `scripts\build.bat` (Requires .NET 4.x).
+2.  Run `scripts\\build.bat` (Requires .NET 4.x).
 3.  Ensure Apollo/Sunshine binaries are in `bundled/`.
-4.  Open `installer\setup.iss` in **Inno Setup 6** and compile (F9).
+4.  Open `installer\\setup.iss` in **Inno Setup 6** and compile (F9).
 
 ---
 
