@@ -7,7 +7,7 @@
 ;   3. Abra este arquivo no Inno Setup Compiler e pressione F9
 
 #define AppName "Duo Manager Fix"
-#define AppVersion "2.0.0"
+#define AppVersion "1.0.6"
 #define AppPublisher "thiagorochasti"
 #define AppURL "https://github.com/thiagorochasti/duo-manager-fix"
 #define DuoDir "C:\Program Files\Duo"
