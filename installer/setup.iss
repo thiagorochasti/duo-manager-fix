@@ -10,6 +10,7 @@
 #define AppVersion "1.0.6"
 #define AppPublisher "thiagorochasti"
 #define AppURL "https://github.com/thiagorochasti/duo-manager-fix"
+#define ServiceName "DuoGamepadIsolator"
 #define DuoDir "C:\Program Files\Duo"
 
 
@@ -332,6 +333,21 @@ begin
 
   MsgBox(StatusMsg, mbInformation, MB_OK);
 
+end;
+
+
+// ============================================================
+// Uninstall
+// ============================================================
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var ResultCode: Integer;
+begin
+  if CurUninstallStep = usUninstall then
+  begin
+    // Limpeza de legado: Garante que o Gamepad Isolator antigo (se existir) seja removido
+    Exec('sc.exe', 'stop {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec('sc.exe', 'delete {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  end;
 end;
 
 end.
