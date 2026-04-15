@@ -166,6 +166,13 @@ var
   ResultCode: Integer;
   StatusMsg:  String;
 begin
+  if CurStep = ssInstall then
+  begin
+    // Limpeza de legado (Pre-Install): Garante que o servico isolador antigo seja removido do sistema
+    Exec('sc.exe', 'stop {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec('sc.exe', 'delete {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  end;
+
   if CurStep <> ssPostInstall then Exit;
 
   DuoDir := ExpandConstant('{#DuoDir}');
