@@ -52,6 +52,17 @@ class DuoRdpWrapper {
         public UIntPtr PeakJobMemoryUsed;
     }
 
+    // Lê SUNSHINE_CLIENT_WIDTH / SUNSHINE_CLIENT_HEIGHT injetadas pelo Sunshine em todos os processos filhos.
+    // Esta é a fonte mais confiável: é a resolução exata que o Moonlight negociou.
+    static bool TryReadSunshineEnvResolution(out int width, out int height) {
+        width  = 0;
+        height = 0;
+        string w = Environment.GetEnvironmentVariable("SUNSHINE_CLIENT_WIDTH");
+        string h = Environment.GetEnvironmentVariable("SUNSHINE_CLIENT_HEIGHT");
+        if (string.IsNullOrEmpty(w) || string.IsNullOrEmpty(h)) return false;
+        return int.TryParse(w, out width) && int.TryParse(h, out height) && width > 0 && height > 0;
+    }
+
     // Le a resolucao de streaming do Games.log (Sunshine/Apollo com min_log_level=info).
     // O Sunshine registra "Desktop resolution [WxH]" antes de invocar DuoRdp.exe.
     // Busca do fim para o inicio para pegar a sessao mais recente.
@@ -128,15 +139,19 @@ class DuoRdpWrapper {
             int targetH   = origHeight;
             string resSource = null;
 
-            // Sempre tenta ler a resolução real negociada pelo Moonlight.
-            // Prioridade 1: clientViewportWd/Ht do Games.log (gravado pelo Apollo antes de invocar DuoRdp.exe)
-            // Prioridade 2: dd_manual_resolution do sunshine.conf
-            // Fallback: usa o que o Duo enviou (qualquer valor, incluindo 640x480 ou resolução do monitor físico)
+            // Prioridade 1: env vars SUNSHINE_CLIENT_WIDTH/HEIGHT (injetadas pelo Sunshine — resolução exata do Moonlight)
+            // Prioridade 2: Desktop resolution do Games.log (fallback: resolução do desktop host)
+            // Prioridade 3: dd_manual_resolution do sunshine.conf (Apollo config estático)
+            // Fallback: usa o que o Duo enviou
             int rW, rH;
-            if (TryReadMoonlightResolution(duoDir, out rW, out rH)) {
+            if (TryReadSunshineEnvResolution(out rW, out rH)) {
                 targetW   = rW;
                 targetH   = rH;
-                resSource = "Moonlight (Games.log)";
+                resSource = "Sunshine env (SUNSHINE_CLIENT_WIDTH/HEIGHT)";
+            } else if (TryReadMoonlightResolution(duoDir, out rW, out rH)) {
+                targetW   = rW;
+                targetH   = rH;
+                resSource = "Games.log (Desktop resolution)";
             } else if (TryReadApolloResolution(duoDir, out rW, out rH)) {
                 targetW   = rW;
                 targetH   = rH;
