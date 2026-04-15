@@ -52,6 +52,31 @@ class DuoRdpWrapper {
         public UIntPtr PeakJobMemoryUsed;
     }
 
+    // Lê target_resolution de C:\Program Files\Duo\config\duo_wrapper.conf
+    // Formato: target_resolution=1920x1080
+    // Permite o usuário forçar uma resolução específica independente do monitor físico.
+    static bool TryReadWrapperConfig(string duoDir, out int width, out int height) {
+        width  = 0;
+        height = 0;
+        string confPath = Path.Combine(duoDir, "config", "duo_wrapper.conf");
+        if (!File.Exists(confPath)) return false;
+        try {
+            foreach (string line in File.ReadAllLines(confPath)) {
+                string trimmed = line.Trim();
+                if (!trimmed.StartsWith("target_resolution", StringComparison.OrdinalIgnoreCase)) continue;
+                int eq = trimmed.IndexOf('=');
+                if (eq < 0) continue;
+                string val = trimmed.Substring(eq + 1).Trim();
+                Match m = Regex.Match(val, @"^(\d+)\s*[xX]\s*(\d+)$");
+                if (!m.Success) continue;
+                width  = int.Parse(m.Groups[1].Value);
+                height = int.Parse(m.Groups[2].Value);
+                return width > 0 && height > 0;
+            }
+        } catch { }
+        return false;
+    }
+
     // Lê SUNSHINE_CLIENT_WIDTH / SUNSHINE_CLIENT_HEIGHT injetadas pelo Sunshine em todos os processos filhos.
     // Esta é a fonte mais confiável: é a resolução exata que o Moonlight negociou.
     static bool TryReadSunshineEnvResolution(out int width, out int height) {
@@ -139,12 +164,17 @@ class DuoRdpWrapper {
             int targetH   = origHeight;
             string resSource = null;
 
-            // Prioridade 1: env vars SUNSHINE_CLIENT_WIDTH/HEIGHT (injetadas pelo Sunshine — resolução exata do Moonlight)
-            // Prioridade 2: Desktop resolution do Games.log (fallback: resolução do desktop host)
-            // Prioridade 3: dd_manual_resolution do sunshine.conf (Apollo config estático)
+            // Prioridade 1: duo_wrapper.conf (override manual do usuário)
+            // Prioridade 2: env vars SUNSHINE_CLIENT_WIDTH/HEIGHT (não injetadas pelo Duo fork — reservado para futuro)
+            // Prioridade 3: Desktop resolution do Games.log (resolução do RDP virtual display)
+            // Prioridade 4: dd_manual_resolution do sunshine.conf (Apollo config estático)
             // Fallback: usa o que o Duo enviou
             int rW, rH;
-            if (TryReadSunshineEnvResolution(out rW, out rH)) {
+            if (TryReadWrapperConfig(duoDir, out rW, out rH)) {
+                targetW   = rW;
+                targetH   = rH;
+                resSource = "duo_wrapper.conf (custom)";
+            } else if (TryReadSunshineEnvResolution(out rW, out rH)) {
                 targetW   = rW;
                 targetH   = rH;
                 resSource = "Sunshine env (SUNSHINE_CLIENT_WIDTH/HEIGHT)";
