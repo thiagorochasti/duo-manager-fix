@@ -32,43 +32,24 @@ On NVIDIA RTX GPUs this is compounded by the bundled binary also failing to dete
 
 **Fix:** The installer replaces `sunshine.exe` with a version from [Apollo 0.4.6](https://github.com/SudoMaker/Apollo) — a maintained fork that starts cleanly on recent Windows 11 and uses NVENC HEVC encoding on RTX cards. No separate Apollo installation needed; it is bundled.
 
-### 2 — Resolution stuck at 640×480
-
-Once the server is running, Moonlight connects but the session is always 640×480 regardless of what resolution Moonlight requests. Duo Manager hardcodes `640 480` in the arguments it passes to its internal RDP component every time.
-
-**Fix:** A wrapper intercepts those arguments and dynamically applies the correct resolution matching the client. Because Windows Remote Desktop locks resolution mid-session, the wrapper works predictively:
-1. It reads the resolution explicitly requested by Moonlight during your **previous session** (via `Games.log`).
-2. If none exists (or you just installed), it uses a safe fallback of `1920×1080` (preventing the previous 4K host overload bug).
-*(Note: To sync a brand new screen size, just connect once, close the stream, and connect again!)*
-
-### 3 — Web management UI blank
-
-After the streaming engine is replaced, the management page at `https://YOUR_PC:62203` shows a blank page. This happens because Duo's bundled HTML files reference Vue.js assets from an older Sunshine version that are no longer present.
-
-**Fix:** The installer replaces the HTML and JavaScript files in Duo's web folder with the versions that match the streaming engine bundled in this package.
-
-### 4 — Remote controller leaking into host Steam
-
-When a gamepad is connected through Moonlight, the host PC's Steam also detects it and reacts — because ViGEmBus creates virtual devices globally, visible to all Windows sessions simultaneously. On recent Windows 11 builds this became noticeably more disruptive.
-
-**Fix:** A background Windows service (`DuoGamepadIsolator`) monitors for new virtual gamepad devices. When one appears, it:
-1. Identifies the physically logged-in user on the PC
-2. Applies a permission rule (DACL) that blocks only that user from accessing the device
-3. Forces a device reset so any handles Steam already held are closed
-
-Result: the streaming session uses the controller normally; the host PC's Steam never sees it.
-
-### 5 — Installer requires manual elevation
+### 4 — Auto-Admin Installer
 
 Previously, installing the fix required manually right-clicking and selecting "Run as Administrator", which led to failed installations if forgotten.
 
 **Fix:** The installer now automatically requests Administrator privileges (UAC prompt) when double-clicked.
 
-### 6 — PIN Pairing requires host intervention
+### 5 — PIN Pairing requires host intervention
 
 When pairing a new Moonlight client, Apollo was failing to grant proper administrative permissions seamlessly, requiring the user to interact with the host PC.
 
 **Fix:** The pairing process via the web UI has been patched to automatically grant full permissions to the new client without any manual UAC intervention.
+
+### 6 — Dual Engine Support (Apollo vs Sunshine)
+
+You can now choose which streaming engine to use during installation.
+- **Apollo 0.4.6:** Stable, tested, and works best for most users.
+- **Sunshine Native:** Experimental, provides better support for newer HID devices and DualSense.
+
 
 ---
 
@@ -134,14 +115,10 @@ Or use **Add/Remove Programs** → "Duo Manager Fix" (handles the service automa
 - Make sure your GPU drivers are up to date
 - Restart the Duo Manager service after installing
 
-**Controller still appears on host Steam**
-- Run `sc query DuoGamepadIsolator` — service must be `RUNNING`
-- The service must be running *before* you connect Moonlight
-- Check `C:\Users\Public\duo_isolator.log` for errors
-
 **Web UI blank page**
 - Clear browser cache and retry
 - Check `C:\Program Files\Duo\assets\web\assets\` — should contain `.js` files
+
 
 **Resolution still low or not updating to my device immediately?**
 Here is exactly how the dynamic resolution logic works to bypass the RDP lock:

@@ -1,0 +1,34 @@
+{
+    "env": {},
+    "apps": [
+        {
+            "name": "Desktop",
+            "uuid": "3C56B52A-50C8-3601-CC0D-042310A47F60",
+            "image-path": "desktop.png",
+            "prep-cmd": []
+        },
+        {
+            "name": "Ryujinx",
+            "uuid": "A1B2C3D4-5678-9ABC-DEF0-1234567890AB",
+            "cmd": "C:\\Emuladores\\ryujinx-1.3.3-win_x64\\publish\\Ryujinx.exe",
+            "auto-detach": true,
+            "wait-all": true,
+            "image-path": "C:\\Program Files\\Duo\\config/covers/igdb_85663.png"
+        },
+        {
+            "name": "Steam Big Picture",
+            "uuid": "B27218EA-7DEB-C42F-AC87-A7A4CB305671",
+            "cmd": "steam://open/bigpicture",
+            "prep-cmd": [
+                {
+                    "do": "",
+                    "undo": "steam://close/bigpicture"
+                }
+            ],
+            "auto-detach": true,
+            "wait-all": true,
+            "image-path": "steam.png"
+        }
+    ],
+    "version": 2
+}

@@ -225,6 +225,23 @@ class DuoGamepadIsolator : ServiceBase {
     const uint FILE_SHARE_RWD        = 7; // READ | WRITE | DELETE
     const uint OPEN_EXISTING_DISP    = 3;
 
+    // Dispositivos fisicos redirecionados via RDP que devem ser bloqueados no HOST.
+    // O DS4 (DualShock 4) aparece como HID nativo quando redirecionado, e o Steam
+    // do admin o detecta. Bloqueamos via HidHide para que apenas a sessao RDP o veja.
+    static readonly string[] PHYSICAL_BLOCK_VIDPIDS = new string[] {
+        // Sony PlayStation
+        "VID_054C&PID_05C4",  // DualShock 4 (1st gen)
+        "VID_054C&PID_09CC",  // DualShock 4 (2nd gen)
+        "VID_054C&PID_0CE6",  // DualSense (PS5)
+        "VID_054C&PID_0DF2",  // DualSense Edge (PS5)
+        // Microsoft Xbox
+        "VID_045E&PID_028E",  // Xbox 360 Controller
+        "VID_045E&PID_02FF",  // Xbox One Controller (USB)
+        "VID_045E&PID_02EA",  // Xbox One S Controller (USB)
+        "VID_045E&PID_0B12",  // Xbox Series X|S Controller (USB)
+        "VID_045E&PID_0B13",  // Xbox Series X|S Controller (Bluetooth)
+    };
+
     // =====================================================================
     // Estado
     // =====================================================================
@@ -235,7 +252,8 @@ class DuoGamepadIsolator : ServiceBase {
     Thread             _hidHideThread;
     volatile bool      _running;
     bool               _hidHideAvailable;
-    IntPtr             _hHidHide = IntPtr.Zero; // Handle direto ao driver HidHide
+    // NOTA: NÃO manter handle persistente ao HidHide — driver só permite 1 conexão.
+    // Usar OpenHidHideHandle() para abrir/fechar por operação.
     readonly object    _lock = new object();
     uint               _vigemBusInst = 0;
 
@@ -257,6 +275,14 @@ class DuoGamepadIsolator : ServiceBase {
 
     // Registry security: instanceIds onde escrevemos SD no registro (para restaurar ao parar)
     readonly HashSet<string> _deviceIdsWithRegistrySecurity = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    // Dispositivos fisicos bloqueados (DS4/DualSense redirecionados via RDP)
+    readonly HashSet<string> _physicalBlockedDevices = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    // Dispositivos fisicos "locais" — presentes ANTES de qualquer sessao RDP.
+    // Estes pertencem ao admin do host e NAO devem ser bloqueados.
+    readonly HashSet<string> _localPhysicalDevices = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    volatile bool _baselineComplete = false;
 
     public DuoGamepadIsolator() { ServiceName = SERVICE_NAME; }
 
@@ -352,12 +378,50 @@ class DuoGamepadIsolator : ServiceBase {
             _devInstProcessed.Clear();
             _symLinkToParent.Clear();
             _parentIfaceCount.Clear();
+            _physicalBlockedDevices.Clear();
+            _localPhysicalDevices.Clear();
+            _baselineComplete = false;
         }
         foreach (var id in toRestore) RestoreDeviceSecurityInRegistry(id);
     }
 
+    // Registra todos os controles fisicos alvo ja presentes no sistema.
+    // Estes sao considerados "locais" (do admin) e nao serao bloqueados.
+    void BaselinePhysicalDevices() {
+        var guid = HID_GUID;
+        IntPtr devs = SetupDiGetClassDevs(
+            ref guid, IntPtr.Zero, IntPtr.Zero, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+        if (devs == new IntPtr(-1)) { _baselineComplete = true; return; }
+        int count = 0;
+        try {
+            uint idx = 0;
+            while (true) {
+                var iface = new SP_DEVICE_INTERFACE_DATA {
+                    cbSize = (uint)Marshal.SizeOf(typeof(SP_DEVICE_INTERFACE_DATA))
+                };
+                if (!SetupDiEnumDeviceInterfaces(devs, IntPtr.Zero, ref guid, idx, ref iface)) break;
+                idx++;
+                var devInfo = new SP_DEVINFO_DATA {
+                    cbSize = (uint)Marshal.SizeOf(typeof(SP_DEVINFO_DATA))
+                };
+                string path = GetDevicePath(devs, ref iface, ref devInfo);
+                if (path == null) continue;
+                if (IsPhysicalBlockTarget(path)) {
+                    string instanceId = SymLinkToInstanceId(path);
+                    lock (_lock) { _localPhysicalDevices.Add(instanceId); }
+                    count++;
+                    Log("Baseline: controle local registrado (" + instanceId + ")");
+                }
+            }
+        } finally { SetupDiDestroyDeviceInfoList(devs); }
+        _baselineComplete = true;
+        Log("Baseline: " + count + " controle(s) fisico(s) local(is) registrado(s).");
+    }
+
     void InitialScan() {
         Thread.Sleep(1000);
+        Log("Baseline de dispositivos fisicos locais...");
+        BaselinePhysicalDevices();
         Log("Scan inicial...");
         ScanAllHidDevices();
         Log("Scan inicial concluido.");
@@ -383,19 +447,27 @@ class DuoGamepadIsolator : ServiceBase {
     // anterior do CLI) já tiver o handle, o CLI trava indefinidamente.
     // Usando DeviceIoControl direto com FILE_SHARE flags, evitamos deadlocks.
 
-    void InitHidHide() {
-        // Tenta abrir handle direto ao driver HidHide
-        _hHidHide = CreateFileW(@"\\.\HidHide", GENERIC_READ_ACCESS, FILE_SHARE_RWD,
+    // Abre handle transiente ao HidHide — DEVE ser fechado pelo chamador.
+    // Retorna IntPtr.Zero se falhar.
+    IntPtr OpenHidHideHandle() {
+        IntPtr h = CreateFileW(@"\\.\HidHide", GENERIC_READ_ACCESS, FILE_SHARE_RWD,
             IntPtr.Zero, OPEN_EXISTING_DISP, 0, IntPtr.Zero);
-        if (_hHidHide == new IntPtr(-1)) {
-            _hHidHide = IntPtr.Zero;
+        if (h == new IntPtr(-1)) return IntPtr.Zero;
+        return h;
+    }
+
+    void InitHidHide() {
+        // Testa se o driver está acessível (abre e fecha imediatamente)
+        IntPtr test = OpenHidHideHandle();
+        if (test == IntPtr.Zero) {
             int err = Marshal.GetLastWin32Error();
             Log("HidHide: driver nao acessivel (err=" + err + ") — isolamento XInput desabilitado.");
             _hidHideAvailable = false;
             return;
         }
+        CloseHandle(test);
         _hidHideAvailable = true;
-        Log("HidHide: handle aberto via IOCTL direto.");
+        Log("HidHide: driver acessivel (handle transiente — sem lock persistente).");
 
         // Limpa blacklist de execucoes anteriores (crash, servico morto no meio, etc.)
         try {
@@ -433,7 +505,7 @@ class DuoGamepadIsolator : ServiceBase {
         }
         foreach (var id in toRestore) RestoreDeviceSecurityInRegistry(id);
 
-        if (!_hidHideAvailable || _hHidHide == IntPtr.Zero) return;
+        if (!_hidHideAvailable) return;
 
         // Limpa blacklist completa — não usa _hiddenDevices porque callbacks tardios
         // podem tê-lo esvaziado antes do shutdown. Zerando tudo garantimos estado limpo.
@@ -448,48 +520,56 @@ class DuoGamepadIsolator : ServiceBase {
         // Desativa cloak
         HidHideSetActive(false);
         Log("HidHide: cloak desativado.");
-
-        // Fecha handle
-        CloseHandle(_hHidHide);
-        _hHidHide = IntPtr.Zero;
     }
 
     // ---- IOCTL helpers ----
 
     void HidHideSetActive(bool active) {
-        if (_hHidHide == IntPtr.Zero) return;
-        byte[] buf = new byte[] { (byte)(active ? 1 : 0) };
-        uint ret;
-        if (!DeviceIoControl(_hHidHide, IOCTL_HH_SET_ACTIVE, buf, 1, null, 0, out ret, IntPtr.Zero))
-            Log("HidHide SET_ACTIVE erro=" + Marshal.GetLastWin32Error());
+        if (!_hidHideAvailable) return;
+        IntPtr h = OpenHidHideHandle();
+        if (h == IntPtr.Zero) { Log("HidHide SET_ACTIVE: handle falhou"); return; }
+        try {
+            byte[] buf = new byte[] { (byte)(active ? 1 : 0) };
+            uint ret;
+            if (!DeviceIoControl(h, IOCTL_HH_SET_ACTIVE, buf, 1, null, 0, out ret, IntPtr.Zero))
+                Log("HidHide SET_ACTIVE erro=" + Marshal.GetLastWin32Error());
+        } finally { CloseHandle(h); }
     }
 
     List<string> HidHideGetMultiString(uint ioctl) {
         var result = new List<string>();
-        if (_hHidHide == IntPtr.Zero) return result;
-        byte[] buf = new byte[65536];
-        uint ret;
-        if (!DeviceIoControl(_hHidHide, ioctl, null, 0, buf, (uint)buf.Length, out ret, IntPtr.Zero))
-            return result;
-        string all = Encoding.Unicode.GetString(buf, 0, (int)ret);
-        foreach (string s in all.Split('\0'))
-            if (!string.IsNullOrEmpty(s)) result.Add(s);
+        if (!_hidHideAvailable) return result;
+        IntPtr h = OpenHidHideHandle();
+        if (h == IntPtr.Zero) return result;
+        try {
+            byte[] buf = new byte[65536];
+            uint ret;
+            if (!DeviceIoControl(h, ioctl, null, 0, buf, (uint)buf.Length, out ret, IntPtr.Zero))
+                return result;
+            string all = Encoding.Unicode.GetString(buf, 0, (int)ret);
+            foreach (string s in all.Split('\0'))
+                if (!string.IsNullOrEmpty(s)) result.Add(s);
+        } finally { CloseHandle(h); }
         return result;
     }
 
     void HidHideSetMultiString(uint ioctl, List<string> items) {
-        if (_hHidHide == IntPtr.Zero) return;
-        var sb = new StringBuilder();
-        foreach (var s in items) { sb.Append(s); sb.Append('\0'); }
-        sb.Append('\0'); // double-null terminator
-        byte[] data = Encoding.Unicode.GetBytes(sb.ToString());
-        uint ret;
-        if (!DeviceIoControl(_hHidHide, ioctl, data, (uint)data.Length, null, 0, out ret, IntPtr.Zero))
-            Log("HidHide SET ioctl=0x" + ioctl.ToString("X") + " erro=" + Marshal.GetLastWin32Error());
+        if (!_hidHideAvailable) return;
+        IntPtr h = OpenHidHideHandle();
+        if (h == IntPtr.Zero) { Log("HidHide SET ioctl=0x" + ioctl.ToString("X") + ": handle falhou"); return; }
+        try {
+            var sb = new StringBuilder();
+            foreach (var s in items) { sb.Append(s); sb.Append('\0'); }
+            sb.Append('\0'); // double-null terminator
+            byte[] data = Encoding.Unicode.GetBytes(sb.ToString());
+            uint ret;
+            if (!DeviceIoControl(h, ioctl, data, (uint)data.Length, null, 0, out ret, IntPtr.Zero))
+                Log("HidHide SET ioctl=0x" + ioctl.ToString("X") + " erro=" + Marshal.GetLastWin32Error());
+        } finally { CloseHandle(h); }
     }
 
     void HidHideAddToBlacklist(string instanceId) {
-        if (_hHidHide == IntPtr.Zero) return;
+        if (!_hidHideAvailable) return;
         var current = HidHideGetMultiString(IOCTL_HH_GET_BLACKLIST);
         // Não duplicar
         foreach (var s in current)
@@ -499,7 +579,7 @@ class DuoGamepadIsolator : ServiceBase {
     }
 
     void HidHideRemoveFromBlacklist(string instanceId) {
-        if (_hHidHide == IntPtr.Zero) return;
+        if (!_hidHideAvailable) return;
         var current = HidHideGetMultiString(IOCTL_HH_GET_BLACKLIST);
         var keep = new List<string>();
         foreach (var s in current)
@@ -523,7 +603,7 @@ class DuoGamepadIsolator : ServiceBase {
     }
 
     void HidHideAddToWhitelist(string exePath) {
-        if (_hHidHide == IntPtr.Zero || !File.Exists(exePath)) return;
+        if (!_hidHideAvailable || !File.Exists(exePath)) return;
         string ntPath = ToNtImagePath(exePath);
         var current = HidHideGetMultiString(IOCTL_HH_GET_WHITELIST);
         foreach (var s in current)
@@ -534,7 +614,7 @@ class DuoGamepadIsolator : ServiceBase {
     }
 
     void HidHideRemoveFromWhitelist(string exePath) {
-        if (_hHidHide == IntPtr.Zero) return;
+        if (!_hidHideAvailable) return;
         string ntPath = ToNtImagePath(exePath);
         var current = HidHideGetMultiString(IOCTL_HH_GET_WHITELIST);
         var keep = new List<string>();
@@ -638,16 +718,22 @@ class DuoGamepadIsolator : ServiceBase {
                         }
                     }
 
-                    // NÃO remover da blacklist se o device está em reciclo
-                    if (_hidHideAvailable && !_recyclingDevices.Contains(instanceId)) {
+                    // NÃO remover da blacklist se:
+                    //   - o device está em reciclo (CM_Disable/Enable)
+                    //   - o device é um controle fisico bloqueado (DS4/DualSense/Xbox via RDP)
+                    if (_hidHideAvailable && !_recyclingDevices.Contains(instanceId)
+                        && !_physicalBlockedDevices.Contains(instanceId)) {
                         if (_hiddenDevices.Remove(instanceId)) unhide = true;
-                        
+
                         // Remover tambem o pai USB (se registrado) ao remover o HID
                         string usbId = GetDeviceId(parent);
                         if (!string.IsNullOrEmpty(usbId) && !_recyclingDevices.Contains(usbId) && _hiddenDevices.Remove(usbId)) {
                             HidHideRemoveFromBlacklist(usbId);
                             Log("  HidHide: USB pai restaurado (" + usbId + ")");
                         }
+                    }
+                    if (_physicalBlockedDevices.Contains(instanceId)) {
+                        Log("FISICO: REMOVAL ignorado — mantendo bloqueio (" + instanceId + ")");
                     }
                 }
 
@@ -659,6 +745,13 @@ class DuoGamepadIsolator : ServiceBase {
             }
 
             if (Action != CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL) return 0;
+
+            // Dispositivo fisico alvo (DS4/DualSense via RDP)? Bloqueia direto, sem passar pelo fluxo ViGEm.
+            if (IsPhysicalBlockTarget(symLink)) {
+                ProcessPhysicalBlockDevice(symLink);
+                lock (_lock) { _done.Add(symLink); }
+                return 0;
+            }
 
             lock (_lock) {
                 if (_done.Contains(symLink)) return 0;
@@ -735,6 +828,15 @@ class DuoGamepadIsolator : ServiceBase {
                 countAll++;
 
                 lock (_lock) { if (_done.Contains(path)) continue; }
+
+                // Dispositivo fisico alvo (DS4/DualSense/Xbox via RDP)? Bloqueia direto.
+                if (IsPhysicalBlockTarget(path)) {
+                    ProcessPhysicalBlockDevice(path);
+                    lock (_lock) { _done.Add(path); }
+                    countProcessed++;
+                    continue;
+                }
+
                 if (!IsViGEmDevice(devInfo.DevInst)) continue;
                 countVigem++;
 
@@ -919,6 +1021,57 @@ class DuoGamepadIsolator : ServiceBase {
         int last = s.LastIndexOf('#');
         if (last > 0) s = s.Substring(0, last);
         return s.Replace('#', '\\');
+    }
+
+    // Verifica se o symLink ou instanceId contem um VID/PID de dispositivo fisico
+    // que deve ser bloqueado no host (DS4, DualSense redirecionados via RDP).
+    static bool IsPhysicalBlockTarget(string path) {
+        if (string.IsNullOrEmpty(path)) return false;
+        for (int i = 0; i < PHYSICAL_BLOCK_VIDPIDS.Length; i++)
+            if (path.IndexOf(PHYSICAL_BLOCK_VIDPIDS[i], StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+        return false;
+    }
+
+    // Processa um dispositivo fisico alvo: aplica HidHide blacklist sem reciclo.
+    // Diferente dos virtuais ViGEm, dispositivos fisicos redirecionados via RDP
+    // nao precisam de DACL nem reciclo — apenas o bloqueio HidHide e suficiente
+    // para impedir que o Steam do host os detecte.
+    void ProcessPhysicalBlockDevice(string devicePath) {
+        string instanceId = SymLinkToInstanceId(devicePath);
+        if (!_hidHideAvailable) {
+            Log("FISICO: " + instanceId + " detectado mas HidHide indisponivel.");
+            return;
+        }
+
+        // Se o baseline ja foi feito e este dispositivo estava presente antes de
+        // qualquer sessao RDP, ele pertence ao admin do host — nao bloquear.
+        lock (_lock) {
+            if (_baselineComplete && _localPhysicalDevices.Contains(instanceId)) {
+                Log("FISICO: " + instanceId + " e local (admin) — nao bloqueado.");
+                return;
+            }
+            if (_physicalBlockedDevices.Contains(instanceId)) return;
+            _physicalBlockedDevices.Add(instanceId);
+            _hiddenDevices.Add(instanceId);
+        }
+
+        HidHideAddToBlacklist(instanceId);
+        Log("FISICO: bloqueado no host via HidHide (" + instanceId + ")");
+
+        // Tambem bloqueia o parent USB se existir
+        uint devInst;
+        if (CM_Locate_DevNodeW(out devInst, SymLinkToInstancePath(devicePath), 0) == 0) {
+            uint parent;
+            if (CM_Get_Parent(out parent, devInst, 0) == 0) {
+                string parentId = GetDeviceId(parent);
+                if (!string.IsNullOrEmpty(parentId)) {
+                    lock (_lock) { _hiddenDevices.Add(parentId); }
+                    HidHideAddToBlacklist(parentId);
+                    Log("FISICO: USB pai bloqueado (" + parentId + ")");
+                }
+            }
+        }
     }
 
     bool IsViGEmDevice(uint devInst) {

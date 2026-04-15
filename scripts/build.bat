@@ -21,19 +21,10 @@ echo.
 if not exist "..\bin" mkdir ..\bin
 
 :: Compilar DuoRdpWrapper
-echo [1/2] Compilando DuoRdpWrapper...
+echo [1/1] Compilando DuoRdpWrapper...
 "%CSC%" /out:..\bin\DuoRdpWrapper.exe ..\src\DuoRdpWrapper.cs
 if errorlevel 1 ( echo ERRO: DuoRdpWrapper falhou. & exit /b 1 )
 echo OK: DuoRdpWrapper.exe
-
-:: Compilar DuoGamepadIsolator
-echo [2/2] Compilando DuoGamepadIsolator...
-"%CSC%" /out:..\bin\DuoGamepadIsolator.exe ..\src\DuoGamepadIsolator.cs ^
-    /reference:System.ServiceProcess.dll ^
-    /reference:System.Security.dll ^
-    /platform:anycpu /optimize+
-if errorlevel 1 ( echo ERRO: DuoGamepadIsolator falhou. & exit /b 1 )
-echo OK: DuoGamepadIsolator.exe
 
 echo.
 echo Build concluido. Binarios em: %~dp0..\bin\
