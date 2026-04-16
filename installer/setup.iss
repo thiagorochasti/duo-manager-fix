@@ -1,10 +1,10 @@
-; Duo Manager Fix — Inno Setup Script (Dual Engine: Apollo + Sunshine)
-; Requer Inno Setup 6.x: https://jrsoftware.org/isinfo.php
+; Duo Manager Fix - Inno Setup Script (Dual Engine: Apollo + Sunshine)
+; Requires Inno Setup 6.x: https://jrsoftware.org/isinfo.php
 ;
-; Antes de compilar:
-;   1. Execute scripts\build.bat          → gera bin\DuoRdpWrapper.exe e bin\DuoGamepadIsolator.exe
-;   2. Execute scripts\prepare_bundle.bat → popula bundled\apollo\ e bundled\sunshine\
-;   3. Abra este arquivo no Inno Setup Compiler e pressione F9
+; Before compiling:
+;   1. Run scripts\build.bat          -> generates release\DuoRdpWrapper.exe
+;   2. Run scripts\prepare_bundle.bat -> populates bundled\apollo\ and bundled\sunshine\
+;   3. Open this file in Inno Setup Compiler and press F9
 
 #define AppName "Duo Manager Fix"
 #define AppVersion "1.0.7"
@@ -40,25 +40,24 @@ CloseApplications=yes
 AlwaysRestart=no
 
 [Languages]
-Name: "portuguese"; MessagesFile: "compiler:Languages\Portuguese.isl"
-Name: "english";    MessagesFile: "compiler:Default.isl"
+Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Messages]
-portuguese.WelcomeLabel1=Bem-vindo ao instalador do %1
-portuguese.WelcomeLabel2=Este instalador corrige problemas do Duo Manager 1.5.6:%n%n  1. Resolucao travada em 640x480%n  2. Interface web de gerenciamento quebrada%n%nVoce podera escolher entre Apollo (estavel) ou Sunshine nativo (experimental).%n%nPre-requisito: Duo Manager 1.5.6 instalado.%n%nClique em Avancar para continuar.
-portuguese.FinishedLabel=Instalacao concluida!%n%nConecte pelo Moonlight e teste.
+WelcomeLabel1=Welcome to the %1 Setup Wizard
+WelcomeLabel2=This installer fixes known issues in Duo Manager 1.5.6:%n%n  1. Resolution locked at 640x480%n  2. Broken web management interface%n%nYou can choose between Apollo (stable) or native Sunshine (experimental).%n%nPrerequisite: Duo Manager 1.5.6 must be installed.%n%nClick Next to continue.
+FinishedLabel=Installation complete!%n%nConnect from Moonlight and test.
 
 
 [Types]
-Name: "apollo";   Description: "Apollo 0.4.6 (estavel — padrao)"
-Name: "sunshine"; Description: "Sunshine Nativo (experimental — melhor suporte HID/DualSense)"
+Name: "apollo";   Description: "Apollo 0.4.6 (stable - recommended)"
+Name: "sunshine"; Description: "Native Sunshine (experimental - better HID/DualSense support)"
 
 [Components]
-Name: "engine_apollo";   Description: "Apollo 0.4.6 — engine de streaming testada e estavel";     Types: apollo;   Flags: exclusive
-Name: "engine_sunshine"; Description: "Sunshine Nativo — suporte melhorado a HID, DualSense e multi-sessao"; Types: sunshine; Flags: exclusive
+Name: "engine_apollo";   Description: "Apollo 0.4.6 - tested and stable streaming engine";                    Types: apollo;   Flags: exclusive
+Name: "engine_sunshine"; Description: "Native Sunshine - improved HID, DualSense and multi-session support"; Types: sunshine; Flags: exclusive
 
 [Files]
-; Binarios compilados (sempre instalados)
+; Compiled binaries (always installed)
 Source: "..\release\DuoRdpWrapper.exe";  DestDir: "{tmp}"; Flags: deleteafterinstall
 
 
@@ -80,7 +79,7 @@ Source: "..\bundled\sunshine\tools\*";           DestDir: "{tmp}\sunshine_tools"
 [Code]
 
 // ============================================================
-// Helper: detecta qual engine foi selecionada
+// Helper: detects which engine was selected
 // ============================================================
 function IsSunshine: Boolean;
 begin
@@ -99,7 +98,7 @@ begin
 end;
 
 // ============================================================
-// AbortInstall: aborta com mensagem clara e restaura backups
+// AbortInstall: aborts with a clear message and restores backups
 // ============================================================
 procedure AbortInstall(Step: String; Reason: String; Hint: String);
 var
@@ -130,7 +129,7 @@ begin
 end;
 
 // ============================================================
-// InitializeSetup: pre-checks
+// InitializeSetup: pre-installation checks
 // ============================================================
 function InitializeSetup(): Boolean;
 begin
@@ -158,7 +157,7 @@ begin
 end;
 
 // ============================================================
-// CurStepChanged: ssPostInstall — aplica todos os fixes
+// CurStepChanged: ssPostInstall - applies all fixes
 // ============================================================
 procedure CurStepChanged(CurStep: TSetupStep);
 var
@@ -168,7 +167,7 @@ var
 begin
   if CurStep = ssInstall then
   begin
-    // Limpeza de legado (Pre-Install): Garante que o servico isolador antigo seja removido do sistema
+    // Legacy cleanup (Pre-Install): ensures any old isolator service is removed from the system
     Exec('sc.exe', 'stop {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec('sc.exe', 'delete {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   end;
@@ -177,13 +176,13 @@ begin
 
   DuoDir := ExpandConstant('{#DuoDir}');
 
-  // Para o servico antes de qualquer copia para evitar arquivo bloqueado
+  // Stop the service before any file copies to avoid locked-file errors
   Exec('sc.exe', 'stop DuoManagerService', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('powershell.exe', '-NoProfile -Command "Start-Sleep -Seconds 3"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
   // ----------------------------------------------------------
-  // Fix 1: DuoRdpWrapper (resolucao 4K)
+  // Fix 1: DuoRdpWrapper (resolution intercept)
   // ----------------------------------------------------------
   Exec('takeown.exe', '/f "' + DuoDir + '\DuoRdp.exe" /a',                   '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('icacls.exe',  '"' + DuoDir + '\DuoRdp.exe" /grant Administrators:F', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
@@ -192,7 +191,7 @@ begin
     Exec('cmd.exe', '/c copy /y "' + DuoDir + '\DuoRdp.exe" "' + DuoDir + '\DuoRdp_orig.exe"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     if (ResultCode <> 0) or (not FileExists(DuoDir + '\DuoRdp_orig.exe')) then
-      AbortInstall('Resolution fix — backup of DuoRdp.exe',
+      AbortInstall('Resolution fix - backup of DuoRdp.exe',
         'Could not create backup DuoRdp_orig.exe (cmd copy returned ' + IntToStr(ResultCode) + ').',
         'Make sure Duo Manager service is stopped and try again.');
   end;
@@ -204,13 +203,13 @@ begin
     '-NoProfile -Command "if ((Get-Item ''' + DuoDir + '\DuoRdp.exe'').Length -gt 100000) { exit 1 } else { exit 0 }"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   if ResultCode <> 0 then
-    AbortInstall('Resolution fix — replacing DuoRdp.exe',
+    AbortInstall('Resolution fix - replacing DuoRdp.exe',
       'File was copied but the original binary is still in place (size > 100 KB).',
       'Run the installer again as Administrator. If the problem persists, download' + #13#10 +
       'DuoRdpWrapper.exe from the release page and copy it manually.');
 
   // ----------------------------------------------------------
-  // Fix 2: Streaming engine (Apollo OU Sunshine)
+  // Fix 2: Streaming engine (Apollo or Sunshine)
   // ----------------------------------------------------------
   Exec('takeown.exe', '/f "' + DuoDir + '\sunshine.exe" /a',                   '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('icacls.exe',  '"' + DuoDir + '\sunshine.exe" /grant Administrators:F', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
@@ -219,12 +218,12 @@ begin
     Exec('cmd.exe', '/c copy /y "' + DuoDir + '\sunshine.exe" "' + DuoDir + '\sunshine_orig.exe"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     if (ResultCode <> 0) or (not FileExists(DuoDir + '\sunshine_orig.exe')) then
-      AbortInstall('Streaming engine — backup of sunshine.exe',
+      AbortInstall('Streaming engine - backup of sunshine.exe',
         'Could not create backup sunshine_orig.exe (cmd copy returned ' + IntToStr(ResultCode) + ').',
         'Make sure Duo Manager service is stopped and try again.');
   end;
 
-  // Copia sunshine.exe da engine selecionada
+  // Copy sunshine.exe from the selected engine
   Exec('cmd.exe', '/c copy /y "' + ExpandConstant('{tmp}\engine\sunshine.exe') + '" "' + DuoDir + '\sunshine.exe"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
@@ -232,16 +231,16 @@ begin
     '-NoProfile -Command "if ((Get-Item ''' + DuoDir + '\sunshine.exe'').Length -lt 10000000) { exit 1 } else { exit 0 }"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   if ResultCode <> 0 then
-    AbortInstall('Streaming engine — replacing sunshine.exe',
+    AbortInstall('Streaming engine - replacing sunshine.exe',
       'File is locked or could not be replaced.',
       'Open Services (services.msc), stop "Duo Manager", then run the installer again.');
 
-  // Sunshine: copia zlib1.dll e assets extras
+  // Sunshine: copy zlib1.dll and extra assets
   if IsSunshine then begin
     Exec('cmd.exe', '/c copy /y "' + ExpandConstant('{tmp}\engine\zlib1.dll') + '" "' + DuoDir + '\zlib1.dll"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-    // Assets completos do Sunshine (configs, web UI estendida)
+    // Full Sunshine assets (configs, extended web UI)
     Exec('takeown.exe', '/f "' + DuoDir + '\assets" /r /d y',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec('icacls.exe', '"' + DuoDir + '\assets" /grant Administrators:F /t',
@@ -251,7 +250,7 @@ begin
       '"' + ExpandConstant('{tmp}\sunshine_assets\*') + '" "' + DuoDir + '\assets\" /Y /E /Q',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-    // Scripts e tools do Sunshine
+    // Sunshine scripts and tools
     Exec('xcopy.exe',
       '"' + ExpandConstant('{tmp}\sunshine_scripts\*') + '" "' + DuoDir + '\scripts\" /Y /E /Q',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
@@ -261,7 +260,7 @@ begin
   end;
 
   // ----------------------------------------------------------
-  // Fix 3: Web assets (interface de gerenciamento)
+  // Fix 3: Web assets (management interface)
   // ----------------------------------------------------------
   Exec('takeown.exe', '/f "' + DuoDir + '\assets" /r /d y',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
@@ -269,30 +268,30 @@ begin
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
   if not ForceDirectories(DuoDir + '\assets\web\assets') then
-    AbortInstall('Web UI assets — creating directory',
+    AbortInstall('Web UI assets - creating directory',
       'Could not create: ' + DuoDir + '\assets\web\assets',
       'Check that you have Administrator rights and the Duo Manager folder is not read-only.');
 
-  // Copia web assets da engine selecionada
+  // Copy web assets from the selected engine
   Exec('xcopy.exe',
     '"' + ExpandConstant('{tmp}\web\*') + '" "' + DuoDir + '\assets\web\" /Y /E /Q',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   if ResultCode <> 0 then
-    AbortInstall('Web UI assets — copy',
+    AbortInstall('Web UI assets - copy',
       'xcopy failed with error code ' + IntToStr(ResultCode) + '.',
       'Check that ' + DuoDir + '\assets\web\ is writable and try again.');
 
-  // Validacao: pin.html existe em ambas as engines
+  // Validation: pin.html must exist for both engines
   if not FileExists(DuoDir + '\assets\web\pin.html') then
-    AbortInstall('Web UI assets — validation',
+    AbortInstall('Web UI assets - validation',
       'pin.html not found after copy.',
       'Antivirus may be blocking the files. Temporarily disable it and try again.');
 
   // ----------------------------------------------------------
-  // Fix 4: Games_apps.json (somente se nao existir — preserva customizacoes do usuario)
+  // Fix 4: Games_apps.json (only if it doesn't exist - preserves user customizations)
   // ----------------------------------------------------------
   if not ForceDirectories(DuoDir + '\config') then
-    AbortInstall('App configuration — creating config directory',
+    AbortInstall('App configuration - creating config directory',
       'Could not create: ' + DuoDir + '\config',
       'Check that you have Administrator rights and the Duo Manager folder is not read-only.');
 
@@ -304,16 +303,16 @@ begin
         '{"uuid":"B27218EA-7DEB-C42F-AC87-A7A4CB305671","name":"Steam Big Picture","cmd":"steam://open/bigpicture","prep-cmd":[{"do":"","undo":"steam://close/bigpicture"}],"wait-all":true,"auto-detach":true,"image-path":"steam.png"}' +
       '],"env":{},"version":2}',
       False) then
-      AbortInstall('App configuration — Games_apps.json',
+      AbortInstall('App configuration - Games_apps.json',
         'Could not write to ' + DuoDir + '\config\Games_apps.json.',
         'Check that the config folder exists and is writable.');
   end;
 
 
   // ----------------------------------------------------------
-  // Fix 5: Games.conf — habilitar debug logging para capturar resolucao do Moonlight
-  // O wrapper le "GET /launch?mode=WxHxFPS" do Games.log (nivel debug) para saber
-  // exatamente a resolucao que o Moonlight solicitou.
+  // Fix 5: Games.conf - enable debug logging to capture Moonlight resolution
+  // The wrapper reads "GET /launch?mode=WxHxFPS" from Games.log (debug level) to know
+  // exactly the resolution requested by Moonlight.
   // ----------------------------------------------------------
   if FileExists(DuoDir + '\config\Games.conf') then begin
     Exec('powershell.exe',
@@ -321,17 +320,18 @@ begin
       '$f = ''' + DuoDir + '\config\Games.conf''; ' +
       '$c = Get-Content $f -Raw; ' +
       '$c = $c -replace ''min_log_level\s*=\s*\w+'', ''min_log_level = debug''; ' +
+      '$c = $c -replace ''virtual_sink\s*=\s*[^\r\n]*'', ''virtual_sink =''; ' +
       '$c | Set-Content $f -NoNewline; ' +
       '"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    // Inicia o servico com o novo nivel de log aplicado
+    // Starts the service with the new log level applied
     Exec('sc.exe', 'start DuoManagerService', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec('powershell.exe', '-NoProfile -Command "Start-Sleep -Seconds 3"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   end;
 
   // ----------------------------------------------------------
-  // Validacao pos-instalacao por componente
+  // Post-installation validation by component
   // ----------------------------------------------------------
   StatusMsg := 'Installation complete (' + EngineName + ' engine).' + #13#10 +
                'Component status:' + #13#10 + #13#10;
@@ -342,7 +342,7 @@ begin
   if ResultCode = 0 then
     StatusMsg := StatusMsg + '  [OK] Resolution wrapper (DuoRdp.exe replaced)' + #13#10
   else
-    StatusMsg := StatusMsg + '  [!!] Resolution wrapper — DuoRdp.exe may not have been replaced' + #13#10;
+    StatusMsg := StatusMsg + '  [!!] Resolution wrapper - DuoRdp.exe may not have been replaced' + #13#10;
 
   Exec('powershell.exe',
     '-NoProfile -Command "if ((Get-Item ''' + DuoDir + '\sunshine.exe'').Length -gt 10000000) { exit 0 } else { exit 1 }"',
@@ -350,12 +350,12 @@ begin
   if ResultCode = 0 then
     StatusMsg := StatusMsg + '  [OK] Streaming engine (' + EngineName + ' sunshine.exe replaced)' + #13#10
   else
-    StatusMsg := StatusMsg + '  [!!] Streaming engine — sunshine.exe may not have been replaced' + #13#10;
+    StatusMsg := StatusMsg + '  [!!] Streaming engine - sunshine.exe may not have been replaced' + #13#10;
 
   if FileExists(DuoDir + '\assets\web\pin.html') then
     StatusMsg := StatusMsg + '  [OK] Web UI assets' + #13#10
   else
-    StatusMsg := StatusMsg + '  [!!] Web UI assets — one or more files missing' + #13#10;
+    StatusMsg := StatusMsg + '  [!!] Web UI assets - one or more files missing' + #13#10;
 
   if IsSunshine then
     StatusMsg := StatusMsg + #13#10 + 'NOTE: You selected Sunshine native engine.' + #13#10 +
@@ -380,22 +380,22 @@ begin
   begin
     DuoDir := ExpandConstant('{#DuoDir}');
 
-    // Para o servico para liberar os arquivos
+    // Stop the service to release files
     Exec('sc.exe', 'stop DuoManagerService', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec('powershell.exe', '-NoProfile -Command "Start-Sleep -Seconds 2"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-    // Restaura DuoRdp_orig.exe -> DuoRdp.exe (remove wrapper)
+    // Restores DuoRdp_orig.exe -> DuoRdp.exe (removes wrapper)
     if FileExists(DuoDir + '\DuoRdp_orig.exe') then
       Exec('cmd.exe', '/c copy /y "' + DuoDir + '\DuoRdp_orig.exe" "' + DuoDir + '\DuoRdp.exe"',
         '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-    // Restaura sunshine_orig.exe -> sunshine.exe (se existir)
+    // Restores sunshine_orig.exe -> sunshine.exe (if it exists)
     if FileExists(DuoDir + '\sunshine_orig.exe') then
       Exec('cmd.exe', '/c copy /y "' + DuoDir + '\sunshine_orig.exe" "' + DuoDir + '\sunshine.exe"',
         '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-    // Restaura min_log_level = none no Games.conf
+    // Restores min_log_level = none in Games.conf
     if FileExists(DuoDir + '\config\Games.conf') then
       Exec('powershell.exe',
         '-NoProfile -Command "' +
@@ -406,10 +406,10 @@ begin
         '"',
         '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-    // Reinicia o servico
+    // Restarts the service
     Exec('sc.exe', 'start DuoManagerService', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-    // Limpeza de legado: remove DuoGamepadIsolator se existir
+    // Legacy cleanup: remove DuoGamepadIsolator if it exists
     Exec('sc.exe', 'stop {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec('sc.exe', 'delete {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   end;

@@ -52,9 +52,9 @@ class DuoRdpWrapper {
         public UIntPtr PeakJobMemoryUsed;
     }
 
-    // Lê target_resolution de C:\Program Files\Duo\config\duo_wrapper.conf
-    // Formato: target_resolution=1920x1080
-    // Permite o usuário forçar uma resolução específica independente do monitor físico.
+    // Reads target_resolution from C:\Program Files\Duo\config\duo_wrapper.conf
+    // Format: target_resolution=1920x1080
+    // Allows the user to force a specific resolution regardless of the physical monitor.
     static bool TryReadWrapperConfig(string duoDir, out int width, out int height) {
         width  = 0;
         height = 0;
@@ -77,8 +77,8 @@ class DuoRdpWrapper {
         return false;
     }
 
-    // Lê SUNSHINE_CLIENT_WIDTH / SUNSHINE_CLIENT_HEIGHT injetadas pelo Sunshine em todos os processos filhos.
-    // Esta é a fonte mais confiável: é a resolução exata que o Moonlight negociou.
+    // Reads SUNSHINE_CLIENT_WIDTH / SUNSHINE_CLIENT_HEIGHT injected by Sunshine into child processes.
+    // Reserved for future compatibility — not currently injected by the Duo fork.
     static bool TryReadSunshineEnvResolution(out int width, out int height) {
         width  = 0;
         height = 0;
@@ -88,9 +88,9 @@ class DuoRdpWrapper {
         return int.TryParse(w, out width) && int.TryParse(h, out height) && width > 0 && height > 0;
     }
 
-    // Lê a resolução exata pedida pelo Moonlight do request HTTP GET /launch?mode=WxHxFPS
-    // gravado pelo Sunshine com min_log_level=debug. Lê só os últimos 512KB para não
-    // bloquear em logs grandes. Busca do fim para o início (sessão mais recente).
+    // Reads the exact resolution requested by Moonlight from the HTTP GET /launch request
+    // logged by Sunshine with min_log_level=debug. Reads only the last 512KB to avoid
+    // blocking on large log files. Searches from end to start (most recent session).
     static bool TryReadMoonlightLaunchResolution(string duoDir, out int width, out int height) {
         width  = 0;
         height = 0;
@@ -106,8 +106,8 @@ class DuoRdpWrapper {
                     content = sr.ReadToEnd();
             }
             string[] lines = content.Split('\n');
-            // Padrão real do debug log do Sunshine: "Debug: mode -- 2560x1600x60"
-            // O parâmetro mode é logado individualmente após "DESTINATION :: /launch"
+            // Sunshine debug log format: "Debug: mode -- 2560x1600x60"
+            // The mode parameter is logged individually after "DESTINATION :: /launch"
             Regex reLaunch = new Regex(@"Debug:\s+mode\s+--\s+(\d+)x(\d+)x\d+",
                 RegexOptions.IgnoreCase);
             for (int i = lines.Length - 1; i >= 0; i--) {
@@ -122,9 +122,9 @@ class DuoRdpWrapper {
         return false;
     }
 
-    // Le a resolucao de streaming do Games.log (Sunshine/Apollo com min_log_level=info).
-    // O Sunshine registra "Desktop resolution [WxH]" antes de invocar DuoRdp.exe.
-    // Busca do fim para o inicio para pegar a sessao mais recente.
+    // Reads the streaming resolution from Games.log (Sunshine/Apollo with min_log_level=info).
+    // Sunshine logs "Desktop resolution [WxH]" before invoking DuoRdp.exe.
+    // Searches from end to start to get the most recent session.
     static bool TryReadMoonlightResolution(string duoDir, out int width, out int height) {
         width = 0;
         height = 0;
@@ -132,7 +132,6 @@ class DuoRdpWrapper {
         if (!File.Exists(logPath)) return false;
         try {
             string[] lines = File.ReadAllLines(logPath);
-            // Padrao principal: "Desktop resolution [1920x1080]"
             Regex reDesktop = new Regex(@"Desktop resolution \[(\d+)x(\d+)\]", RegexOptions.IgnoreCase);
             for (int i = lines.Length - 1; i >= 0; i--) {
                 Match m = reDesktop.Match(lines[i]);
@@ -150,8 +149,8 @@ class DuoRdpWrapper {
         return false;
     }
 
-    // Lê dd_manual_resolution do sunshine.conf do Apollo (fallback secundário).
-    // Formato da linha: "dd_manual_resolution = 1920x1080" (ou sem espaços).
+    // Reads dd_manual_resolution from Apollo's sunshine.conf (secondary fallback).
+    // Line format: "dd_manual_resolution = 1920x1080" (with or without spaces).
     static bool TryReadApolloResolution(string duoDir, out int width, out int height) {
         width = 0;
         height = 0;
@@ -180,7 +179,7 @@ class DuoRdpWrapper {
         string duoDir = @"C:\Program Files\Duo";
 
         using (var sw = new StreamWriter(log, true)) {
-            sw.WriteLine("=== DuoRdpWrapper invocado: " + DateTime.Now);
+            sw.WriteLine("=== DuoRdpWrapper invoked: " + DateTime.Now);
             sw.WriteLine("Args count: " + args.Length);
             for (int i = 0; i < args.Length; i++)
                 sw.WriteLine("  [" + i + "] = " + args[i]);
@@ -194,16 +193,16 @@ class DuoRdpWrapper {
             int.TryParse(args[5], out origWidth);
             int.TryParse(args[6], out origHeight);
 
-            int targetW   = origWidth;
-            int targetH   = origHeight;
+            int targetW      = origWidth;
+            int targetH      = origHeight;
             string resSource = null;
 
-            // Prioridade 1: GET /launch?mode= do debug log (resolução EXATA do Moonlight)
-            // Prioridade 2: env vars SUNSHINE_CLIENT_WIDTH/HEIGHT (reservado para futuro)
-            // Prioridade 3: duo_wrapper.conf (override manual — fallback se log indisponível)
-            // Prioridade 4: Desktop resolution do Games.log (resolução do RDP virtual display)
-            // Prioridade 5: dd_manual_resolution do sunshine.conf (Apollo config estático)
-            // Fallback: usa o que o Duo enviou
+            // Priority 1: GET /launch mode= from debug log (exact Moonlight-requested resolution)
+            // Priority 2: SUNSHINE_CLIENT_WIDTH/HEIGHT env vars (reserved for future compatibility)
+            // Priority 3: duo_wrapper.conf (manual override — fallback if log unavailable)
+            // Priority 4: Desktop resolution from Games.log (RDP virtual display resolution)
+            // Priority 5: dd_manual_resolution from sunshine.conf (Apollo static config)
+            // Fallback: use whatever Duo sent
             int rW, rH;
             if (TryReadMoonlightLaunchResolution(duoDir, out rW, out rH)) {
                 targetW   = rW;
@@ -232,14 +231,14 @@ class DuoRdpWrapper {
 
             using (var sw = new StreamWriter(log, true)) {
                 if (resSource != null && (targetW != origWidth || targetH != origHeight)) {
-                    sw.WriteLine("  => Duo enviou " + origWidth + "x" + origHeight +
-                                 ". Substituindo por " + targetW + "x" + targetH +
+                    sw.WriteLine("  => Duo sent " + origWidth + "x" + origHeight +
+                                 ". Overriding with " + targetW + "x" + targetH +
                                  " [" + resSource + "]");
                 } else if (resSource != null) {
-                    sw.WriteLine("  => Resolucao confirmada: " + targetW + "x" + targetH +
-                                 " [" + resSource + "] — coincide com o que Duo enviou.");
+                    sw.WriteLine("  => Resolution confirmed: " + targetW + "x" + targetH +
+                                 " [" + resSource + "] -- matches what Duo sent.");
                 } else {
-                    sw.WriteLine("  => Games.log nao encontrado. Usando resolucao do Duo: " +
+                    sw.WriteLine("  => Games.log not found. Using Duo resolution: " +
                                  origWidth + "x" + origHeight);
                 }
             }
@@ -250,10 +249,10 @@ class DuoRdpWrapper {
             delegate(string a) { return "\"" + a + "\""; }));
 
         using (var sw = new StreamWriter(log, true)) {
-            sw.WriteLine("  => Chamando: " + realExe + " " + quotedArgs);
+            sw.WriteLine("  => Calling: " + realExe + " " + quotedArgs);
         }
 
-        // Job Object garante que o processo filho morra junto com o wrapper.
+        // Job Object ensures the child process dies when the wrapper exits.
         IntPtr hJob = CreateJobObject(IntPtr.Zero, null);
         if (hJob != IntPtr.Zero) {
             var info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
