@@ -330,11 +330,6 @@ begin
     '} ' +
     '"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  // Starts the service with the new log level applied
-  Exec('sc.exe', 'start DuoManagerService', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec('powershell.exe', '-NoProfile -Command "Start-Sleep -Seconds 3"',
-    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-
   // ----------------------------------------------------------
   // Fix 6: Duo.exe binary patch - zero out hardcoded "Remote Audio" default
   // Duo.exe contains a config defaults table where "Remote Audio" is the
@@ -376,6 +371,12 @@ begin
   // Fix 6 is optional — if the pattern is not found (different Duo version),
   // skip silently and let the rest of the installation complete normally.
   // The DuoRdpWrapper resolution fix still works without this patch.
+
+  // Start the service once — after ALL fixes are applied (DuoRdp.exe, conf, Duo.exe binary).
+  // Starting here ensures the service picks up every change without requiring a manual restart.
+  Exec('sc.exe', 'start DuoManagerService', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('powershell.exe', '-NoProfile -Command "Start-Sleep -Seconds 3"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
   // ----------------------------------------------------------
   // Post-installation validation by component
