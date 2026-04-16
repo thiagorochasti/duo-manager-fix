@@ -177,6 +177,11 @@ begin
 
   DuoDir := ExpandConstant('{#DuoDir}');
 
+  // Para o servico antes de qualquer copia para evitar arquivo bloqueado
+  Exec('sc.exe', 'stop DuoManagerService', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('powershell.exe', '-NoProfile -Command "Start-Sleep -Seconds 3"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
   // ----------------------------------------------------------
   // Fix 1: DuoRdpWrapper (resolucao 4K)
   // ----------------------------------------------------------
@@ -319,11 +324,7 @@ begin
       '$c | Set-Content $f -NoNewline; ' +
       '"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    // Reinicia o servico Duo para que o Sunshine aplique o novo nivel de log
-    // e comece a escrever Games.log antes da primeira conexao.
-    Exec('sc.exe', 'stop DuoManagerService', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Exec('powershell.exe', '-NoProfile -Command "Start-Sleep -Seconds 2"',
-      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    // Inicia o servico com o novo nivel de log aplicado
     Exec('sc.exe', 'start DuoManagerService', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec('powershell.exe', '-NoProfile -Command "Start-Sleep -Seconds 3"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
