@@ -88,13 +88,33 @@ class DuoRdpWrapper {
         return int.TryParse(w, out width) && int.TryParse(h, out height) && width > 0 && height > 0;
     }
 
+    // Reads log_path from Games.conf to find the actual log file name.
+    // Falls back to Games.log if the setting is missing or the file cannot be read.
+    static string GetLogPath(string duoDir) {
+        string confPath = Path.Combine(duoDir, "config", "Games.conf");
+        if (File.Exists(confPath)) {
+            try {
+                foreach (string line in File.ReadAllLines(confPath)) {
+                    string trimmed = line.Trim();
+                    if (!trimmed.StartsWith("log_path", StringComparison.OrdinalIgnoreCase)) continue;
+                    int eq = trimmed.IndexOf('=');
+                    if (eq < 0) continue;
+                    string val = trimmed.Substring(eq + 1).Trim();
+                    if (!string.IsNullOrEmpty(val))
+                        return Path.Combine(duoDir, "config", val);
+                }
+            } catch { }
+        }
+        return Path.Combine(duoDir, "config", "Games.log");
+    }
+
     // Reads the exact resolution requested by Moonlight from the HTTP GET /launch request
     // logged by Sunshine with min_log_level=debug. Reads only the last 512KB to avoid
     // blocking on large log files. Searches from end to start (most recent session).
     static bool TryReadMoonlightLaunchResolution(string duoDir, out int width, out int height) {
         width  = 0;
         height = 0;
-        string logPath = Path.Combine(duoDir, "config", "Games.log");
+        string logPath = GetLogPath(duoDir);
         if (!File.Exists(logPath)) return false;
         try {
             const int maxBytes = 512 * 1024;
@@ -128,7 +148,7 @@ class DuoRdpWrapper {
     static bool TryReadMoonlightResolution(string duoDir, out int width, out int height) {
         width = 0;
         height = 0;
-        string logPath = Path.Combine(duoDir, "config", "Games.log");
+        string logPath = GetLogPath(duoDir);
         if (!File.Exists(logPath)) return false;
         try {
             string[] lines = File.ReadAllLines(logPath);
