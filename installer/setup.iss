@@ -371,11 +371,44 @@ end;
 // Uninstall
 // ============================================================
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
-var ResultCode: Integer;
+var
+  DuoDir:     String;
+  ResultCode: Integer;
 begin
   if CurUninstallStep = usUninstall then
   begin
-    // Limpeza de legado: Garante que o Gamepad Isolator antigo (se existir) seja removido
+    DuoDir := ExpandConstant('{#DuoDir}');
+
+    // Para o servico para liberar os arquivos
+    Exec('sc.exe', 'stop DuoManagerService', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec('powershell.exe', '-NoProfile -Command "Start-Sleep -Seconds 2"',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+    // Restaura DuoRdp_orig.exe -> DuoRdp.exe (remove wrapper)
+    if FileExists(DuoDir + '\DuoRdp_orig.exe') then
+      Exec('cmd.exe', '/c copy /y "' + DuoDir + '\DuoRdp_orig.exe" "' + DuoDir + '\DuoRdp.exe"',
+        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+    // Restaura sunshine_orig.exe -> sunshine.exe (se existir)
+    if FileExists(DuoDir + '\sunshine_orig.exe') then
+      Exec('cmd.exe', '/c copy /y "' + DuoDir + '\sunshine_orig.exe" "' + DuoDir + '\sunshine.exe"',
+        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+    // Restaura min_log_level = none no Games.conf
+    if FileExists(DuoDir + '\config\Games.conf') then
+      Exec('powershell.exe',
+        '-NoProfile -Command "' +
+        '$f = ''' + DuoDir + '\config\Games.conf''; ' +
+        '$c = Get-Content $f -Raw; ' +
+        '$c = $c -replace ''min_log_level\s*=\s*\w+'', ''min_log_level = none''; ' +
+        '$c | Set-Content $f -NoNewline; ' +
+        '"',
+        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+    // Reinicia o servico
+    Exec('sc.exe', 'start DuoManagerService', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+    // Limpeza de legado: remove DuoGamepadIsolator se existir
     Exec('sc.exe', 'stop {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec('sc.exe', 'delete {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   end;
