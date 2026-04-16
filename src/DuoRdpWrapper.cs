@@ -258,7 +258,7 @@ class DuoRdpWrapper {
                     sw.WriteLine("  => Resolution confirmed: " + targetW + "x" + targetH +
                                  " [" + resSource + "] -- matches what Duo sent.");
                 } else {
-                    sw.WriteLine("  => Games.log not found. Using Duo resolution: " +
+                    sw.WriteLine("  => Log file not found (" + GetLogPath(duoDir) + "). Using Duo resolution: " +
                                  origWidth + "x" + origHeight);
                 }
             }
