@@ -140,6 +140,8 @@ class DuoRdpWrapper {
     // Reads the exact resolution requested by Moonlight from the HTTP GET /launch request
     // logged by Sunshine with min_log_level=debug. Reads only the last 512KB to avoid
     // blocking on large log files. Searches from end to start (most recent session).
+    // Only accepts entries whose timestamp is within 60 seconds of now, to avoid using
+    // stale entries from a previous Moonlight session when a new connection is starting.
     static bool TryReadMoonlightLaunchResolution(string duoDir, out int width, out int height) {
         width  = 0;
         height = 0;
@@ -155,17 +157,22 @@ class DuoRdpWrapper {
                     content = sr.ReadToEnd();
             }
             string[] lines = content.Split('\n');
-            // Sunshine debug log format: "Debug: mode -- 2560x1600x60"
+            // Sunshine debug log format: "[2026-04-16 20:40:30.581]: Debug: mode -- 2560x1600x60"
             // The mode parameter is logged individually after "DESTINATION :: /launch"
-            Regex reLaunch = new Regex(@"Debug:\s+mode\s+--\s+(\d+)x(\d+)x\d+",
+            Regex reLaunch = new Regex(
+                @"^\[(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\.\d+\].*Debug:\s+mode\s+--\s+(\d+)x(\d+)x\d+",
                 RegexOptions.IgnoreCase);
+            DateTime now = DateTime.Now;
             for (int i = lines.Length - 1; i >= 0; i--) {
                 Match m = reLaunch.Match(lines[i]);
-                if (m.Success) {
-                    int w = int.Parse(m.Groups[1].Value);
-                    int h = int.Parse(m.Groups[2].Value);
-                    if (w > 0 && h > 0) { width = w; height = h; return true; }
-                }
+                if (!m.Success) continue;
+                // Reject entries older than 60 seconds — they belong to a previous session
+                DateTime ts;
+                if (DateTime.TryParse(m.Groups[1].Value, out ts) &&
+                    (now - ts).TotalSeconds > 60) break;
+                int w = int.Parse(m.Groups[2].Value);
+                int h = int.Parse(m.Groups[3].Value);
+                if (w > 0 && h > 0) { width = w; height = h; return true; }
             }
         } catch { }
         return false;
