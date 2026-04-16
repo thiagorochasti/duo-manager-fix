@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
@@ -78,7 +79,7 @@ class DuoRdpWrapper {
     }
 
     // Reads SUNSHINE_CLIENT_WIDTH / SUNSHINE_CLIENT_HEIGHT injected by Sunshine into child processes.
-    // Reserved for future compatibility — not currently injected by the Duo fork.
+    // Present when Apollo/Sunshine calls DuoRdp.exe directly as the app do_cmd.
     static bool TryReadSunshineEnvResolution(out int width, out int height) {
         width  = 0;
         height = 0;
@@ -135,6 +136,24 @@ class DuoRdpWrapper {
             return Path.Combine(duoDir, "config", stem + ".log");
         }
         return Path.Combine(duoDir, "config", "Games.log");
+    }
+
+    // Reads sunshine_name from the active Sunshine/Apollo conf.
+    // Falls back to null when the setting is absent (caller should use Environment.MachineName).
+    static string ReadSunshineName(string duoDir) {
+        string confPath = GetConfPath(duoDir);
+        if (confPath == null) return null;
+        try {
+            foreach (string line in File.ReadAllLines(confPath)) {
+                string t = line.Trim();
+                if (!t.StartsWith("sunshine_name", StringComparison.OrdinalIgnoreCase)) continue;
+                int eq = t.IndexOf('=');
+                if (eq < 0) continue;
+                string val = t.Substring(eq + 1).Trim();
+                if (!string.IsNullOrEmpty(val)) return val;
+            }
+        } catch { }
+        return null;
     }
 
     // Reads the exact resolution requested by Moonlight from the HTTP GET /launch request
@@ -230,6 +249,11 @@ class DuoRdpWrapper {
         return false;
     }
 
+    static string BuildQuotedArgs(string[] a) {
+        return string.Join(" ", Array.ConvertAll(a,
+            delegate(string s) { return "\"" + s + "\""; }));
+    }
+
     static int Main(string[] args) {
         string log    = @"C:\Users\Public\duordp_args.txt";
         // Derive Duo install directory from the wrapper's own location.
@@ -245,72 +269,129 @@ class DuoRdpWrapper {
                 sw.WriteLine("  [" + i + "] = " + args[i]);
         }
 
-        string[] newArgs = (string[])args.Clone();
+        string[] newArgs;
+        int currentW = 0, currentH = 0;
 
-        if (args.Length >= 7) {
-            int origWidth  = 0;
-            int origHeight = 0;
-            int.TryParse(args[5], out origWidth);
-            int.TryParse(args[6], out origHeight);
-
-            int targetW      = origWidth;
-            int targetH      = origHeight;
+        if (args.Length == 0) {
+            // ── Sunshine direct mode ──────────────────────────────────────────────────
+            // Called by Apollo/Sunshine as the app do_cmd (no args).
+            // SUNSHINE_CLIENT_* env vars are injected per session — use them as
+            // the primary resolution source.
+            int w = 0, h = 0;
             string resSource = null;
 
-            // Priority 1: GET /launch mode= from debug log (exact Moonlight-requested resolution)
-            // Priority 2: SUNSHINE_CLIENT_WIDTH/HEIGHT env vars (reserved for future compatibility)
-            // Priority 3: duo_wrapper.conf (manual override — fallback if log unavailable)
-            // Priority 4: Desktop resolution from Games.log (RDP virtual display resolution)
-            // Priority 5: dd_manual_resolution from sunshine.conf (Apollo static config)
-            // Fallback: use whatever Duo sent
+            // Priority 1: env vars injected by Apollo per session (most reliable)
+            // Priority 2: debug log mode= entry (within 60 s)
+            // Priority 3: info log Desktop resolution
+            // Priority 4: duo_wrapper.conf manual override
+            // Priority 5: Apollo dd_manual_resolution
+            // Fallback : 1920x1080
             int rW, rH;
-            if (TryReadMoonlightLaunchResolution(duoDir, out rW, out rH)) {
-                targetW   = rW;
-                targetH   = rH;
-                resSource = "Moonlight (GET /launch mode=)";
-            } else if (TryReadSunshineEnvResolution(out rW, out rH)) {
-                targetW   = rW;
-                targetH   = rH;
-                resSource = "Sunshine env (SUNSHINE_CLIENT_WIDTH/HEIGHT)";
-            } else if (TryReadWrapperConfig(duoDir, out rW, out rH)) {
-                targetW   = rW;
-                targetH   = rH;
-                resSource = "duo_wrapper.conf (custom)";
+            if (TryReadSunshineEnvResolution(out rW, out rH)) {
+                w = rW; h = rH; resSource = "SUNSHINE_CLIENT_WIDTH/HEIGHT (Apollo env)";
+            } else if (TryReadMoonlightLaunchResolution(duoDir, out rW, out rH)) {
+                w = rW; h = rH; resSource = "Moonlight (GET /launch mode= from log)";
             } else if (TryReadMoonlightResolution(duoDir, out rW, out rH)) {
-                targetW   = rW;
-                targetH   = rH;
-                resSource = "Games.log (Desktop resolution)";
+                w = rW; h = rH; resSource = "log (Desktop resolution)";
+            } else if (TryReadWrapperConfig(duoDir, out rW, out rH)) {
+                w = rW; h = rH; resSource = "duo_wrapper.conf";
             } else if (TryReadApolloResolution(duoDir, out rW, out rH)) {
-                targetW   = rW;
-                targetH   = rH;
-                resSource = "Apollo config (dd_manual_resolution)";
+                w = rW; h = rH; resSource = "Apollo config (dd_manual_resolution)";
             }
 
-            newArgs[5] = targetW.ToString();
-            newArgs[6] = targetH.ToString();
+            if (w <= 0 || h <= 0) { w = 1920; h = 1080; resSource = "fallback 1920x1080"; }
+
+            string machineName = ReadSunshineName(duoDir) ?? Environment.MachineName;
+            string userName    = Environment.UserName;
+            string domainName  = Environment.UserDomainName;
+            int    lcid        = CultureInfo.CurrentCulture.LCID;
+
+            newArgs = new string[] {
+                "127.0.0.1",
+                machineName,
+                userName,
+                domainName,
+                lcid.ToString(),
+                w.ToString(),
+                h.ToString()
+            };
+            currentW = w; currentH = h;
 
             using (var sw = new StreamWriter(log, true)) {
-                if (resSource != null && (targetW != origWidth || targetH != origHeight)) {
-                    sw.WriteLine("  => Duo sent " + origWidth + "x" + origHeight +
-                                 ". Overriding with " + targetW + "x" + targetH +
-                                 " [" + resSource + "]");
-                } else if (resSource != null) {
-                    sw.WriteLine("  => Resolution confirmed: " + targetW + "x" + targetH +
-                                 " [" + resSource + "] -- matches what Duo sent.");
-                } else {
-                    sw.WriteLine("  => Log file not found (" + GetLogPath(duoDir) + "). Using Duo resolution: " +
-                                 origWidth + "x" + origHeight);
+                sw.WriteLine("  => Sunshine direct mode." +
+                             " machine=" + machineName +
+                             " user="    + userName + "@" + domainName +
+                             " lcid="    + lcid +
+                             " res="     + w + "x" + h +
+                             " ["        + resSource + "]");
+            }
+        } else {
+            // ── DuoManagerService mode ────────────────────────────────────────────────
+            // Called by DuoManagerService with 7 connection args.
+            // Override args[5] (width) and args[6] (height) with the correct resolution.
+            newArgs = (string[])args.Clone();
+
+            if (args.Length >= 7) {
+                int origWidth  = 0;
+                int origHeight = 0;
+                int.TryParse(args[5], out origWidth);
+                int.TryParse(args[6], out origHeight);
+
+                int targetW      = origWidth;
+                int targetH      = origHeight;
+                string resSource = null;
+
+                // Priority 1: GET /launch mode= from debug log (exact Moonlight-requested resolution)
+                // Priority 2: SUNSHINE_CLIENT_WIDTH/HEIGHT env vars (present if Apollo is the direct caller)
+                // Priority 3: duo_wrapper.conf (manual override — fallback if log unavailable)
+                // Priority 4: Desktop resolution from Games.log (RDP virtual display resolution)
+                // Priority 5: dd_manual_resolution from sunshine.conf (Apollo static config)
+                // Fallback: use whatever Duo sent
+                int rW, rH;
+                if (TryReadMoonlightLaunchResolution(duoDir, out rW, out rH)) {
+                    targetW   = rW;
+                    targetH   = rH;
+                    resSource = "Moonlight (GET /launch mode=)";
+                } else if (TryReadSunshineEnvResolution(out rW, out rH)) {
+                    targetW   = rW;
+                    targetH   = rH;
+                    resSource = "Sunshine env (SUNSHINE_CLIENT_WIDTH/HEIGHT)";
+                } else if (TryReadWrapperConfig(duoDir, out rW, out rH)) {
+                    targetW   = rW;
+                    targetH   = rH;
+                    resSource = "duo_wrapper.conf (custom)";
+                } else if (TryReadMoonlightResolution(duoDir, out rW, out rH)) {
+                    targetW   = rW;
+                    targetH   = rH;
+                    resSource = "Games.log (Desktop resolution)";
+                } else if (TryReadApolloResolution(duoDir, out rW, out rH)) {
+                    targetW   = rW;
+                    targetH   = rH;
+                    resSource = "Apollo config (dd_manual_resolution)";
+                }
+
+                newArgs[5] = targetW.ToString();
+                newArgs[6] = targetH.ToString();
+                currentW = targetW;
+                currentH = targetH;
+
+                using (var sw = new StreamWriter(log, true)) {
+                    if (resSource != null && (targetW != origWidth || targetH != origHeight)) {
+                        sw.WriteLine("  => Duo sent " + origWidth + "x" + origHeight +
+                                     ". Overriding with " + targetW + "x" + targetH +
+                                     " [" + resSource + "]");
+                    } else if (resSource != null) {
+                        sw.WriteLine("  => Resolution confirmed: " + targetW + "x" + targetH +
+                                     " [" + resSource + "] -- matches what Duo sent.");
+                    } else {
+                        sw.WriteLine("  => Log file not found (" + GetLogPath(duoDir) + "). Using Duo resolution: " +
+                                     origWidth + "x" + origHeight);
+                    }
                 }
             }
         }
 
-        string realExe    = Path.Combine(duoDir, "DuoRdp_orig.exe");
-        string quotedArgs = string.Join(" ", Array.ConvertAll(newArgs,
-            delegate(string a) { return "\"" + a + "\""; }));
-
-        using (var sw = new StreamWriter(log, true)) {
-            sw.WriteLine("  => Calling: " + realExe + " " + quotedArgs);
-        }
+        string realExe = Path.Combine(duoDir, "DuoRdp_orig.exe");
 
         // Job Object ensures the child process dies when the wrapper exits.
         IntPtr hJob = CreateJobObject(IntPtr.Zero, null);
@@ -326,14 +407,52 @@ class DuoRdpWrapper {
 
         var psi = new ProcessStartInfo();
         psi.FileName        = realExe;
-        psi.Arguments       = quotedArgs;
         psi.UseShellExecute = false;
-        var proc = Process.Start(psi);
 
-        if (hJob != IntPtr.Zero)
-            AssignProcessToJobObject(hJob, proc.Handle);
+        // ── Main loop ─────────────────────────────────────────────────────────────────
+        // Launch DuoRdp_orig.exe, then poll the log every 5 seconds while the child
+        // is alive. If Moonlight reconnects with a different resolution (new "mode --"
+        // entry within the last 60 s), kill the child and relaunch with the new args.
+        // This gives real-time resolution updates without restarting DuoManagerService.
+        while (true) {
+            psi.Arguments = BuildQuotedArgs(newArgs);
 
-        proc.WaitForExit();
-        return proc.ExitCode;
+            using (var sw = new StreamWriter(log, true))
+                sw.WriteLine("  => Calling: " + realExe + " " + psi.Arguments);
+
+            var proc = Process.Start(psi);
+
+            if (hJob != IntPtr.Zero)
+                AssignProcessToJobObject(hJob, proc.Handle);
+
+            bool resolutionChanged = false;
+
+            // WaitForExit(5000) returns true if process exited, false on timeout (still alive).
+            while (!proc.WaitForExit(5000)) {
+                int rW, rH;
+                if (TryReadMoonlightLaunchResolution(duoDir, out rW, out rH) &&
+                    (rW != currentW || rH != currentH)) {
+
+                    using (var sw = new StreamWriter(log, true))
+                        sw.WriteLine("=== Resolution change detected: " +
+                                     currentW + "x" + currentH +
+                                     " -> " + rW + "x" + rH +
+                                     ". Restarting DuoRdp_orig.exe.");
+
+                    try { proc.Kill(); } catch { }
+                    proc.WaitForExit();
+
+                    currentW = rW; currentH = rH;
+                    newArgs[newArgs.Length - 2] = rW.ToString();
+                    newArgs[newArgs.Length - 1] = rH.ToString();
+                    resolutionChanged = true;
+                    break;
+                }
+            }
+
+            if (!resolutionChanged)
+                return proc.ExitCode;
+            // else loop back and restart with the new resolution
+        }
     }
 }
