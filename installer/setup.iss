@@ -315,6 +315,9 @@ begin
   // exactly the resolution requested by Moonlight.
   // ----------------------------------------------------------
   if FileExists(DuoDir + '\config\Games.conf') then begin
+    // Remove read-only before editing (in case of reinstall)
+    Exec('attrib.exe', '-R "' + DuoDir + '\config\Games.conf"',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec('powershell.exe',
       '-NoProfile -Command "' +
       '$f = ''' + DuoDir + '\config\Games.conf''; ' +
@@ -323,6 +326,9 @@ begin
       '$c = $c -replace ''virtual_sink\s*=\s*[^\r\n]*'', ''virtual_sink =''; ' +
       '$c | Set-Content $f -NoNewline; ' +
       '"',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    // Lock the file as read-only so Duo cannot write "Remote Audio" back on reconnect
+    Exec('attrib.exe', '+R "' + DuoDir + '\config\Games.conf"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     // Starts the service with the new log level applied
     Exec('sc.exe', 'start DuoManagerService', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
@@ -395,8 +401,10 @@ begin
       Exec('cmd.exe', '/c copy /y "' + DuoDir + '\sunshine_orig.exe" "' + DuoDir + '\sunshine.exe"',
         '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-    // Restores min_log_level = none in Games.conf
-    if FileExists(DuoDir + '\config\Games.conf') then
+    // Restores min_log_level = none in Games.conf and removes read-only lock
+    if FileExists(DuoDir + '\config\Games.conf') then begin
+      Exec('attrib.exe', '-R "' + DuoDir + '\config\Games.conf"',
+        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
       Exec('powershell.exe',
         '-NoProfile -Command "' +
         '$f = ''' + DuoDir + '\config\Games.conf''; ' +
@@ -405,6 +413,7 @@ begin
         '$c | Set-Content $f -NoNewline; ' +
         '"',
         '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    end;
 
     // Restarts the service
     Exec('sc.exe', 'start DuoManagerService', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
