@@ -88,11 +88,37 @@ class DuoRdpWrapper {
         return int.TryParse(w, out width) && int.TryParse(h, out height) && width > 0 && height > 0;
     }
 
-    // Reads log_path from Games.conf to find the actual log file name.
-    // Falls back to Games.log if the setting is missing or the file cannot be read.
+    // Finds the active Sunshine/Apollo config file regardless of sunshine_name.
+    // Apollo names all config files after sunshine_name (e.g. cosmo.conf, Games.conf).
+    // We scan config/*.conf, skip duo_wrapper.conf, and return the first file that
+    // contains "log_path" or "min_log_level" — those keys only appear in the main conf.
+    static string GetConfPath(string duoDir) {
+        string configDir = Path.Combine(duoDir, "config");
+        if (!Directory.Exists(configDir)) return null;
+        try {
+            foreach (string f in Directory.GetFiles(configDir, "*.conf")) {
+                string name = Path.GetFileName(f);
+                if (name.Equals("duo_wrapper.conf", StringComparison.OrdinalIgnoreCase)) continue;
+                try {
+                    foreach (string line in File.ReadAllLines(f)) {
+                        string t = line.Trim();
+                        if (t.StartsWith("log_path", StringComparison.OrdinalIgnoreCase) ||
+                            t.StartsWith("min_log_level", StringComparison.OrdinalIgnoreCase))
+                            return f;
+                    }
+                } catch { }
+            }
+        } catch { }
+        // Last resort: fall back to the conventional name
+        string fallback = Path.Combine(configDir, "Games.conf");
+        return File.Exists(fallback) ? fallback : null;
+    }
+
+    // Reads log_path from the active Sunshine/Apollo conf to find the actual log file.
+    // Falls back to {conf_stem}.log (e.g. cosmo.log) when the setting is absent.
     static string GetLogPath(string duoDir) {
-        string confPath = Path.Combine(duoDir, "config", "Games.conf");
-        if (File.Exists(confPath)) {
+        string confPath = GetConfPath(duoDir);
+        if (confPath != null && File.Exists(confPath)) {
             try {
                 foreach (string line in File.ReadAllLines(confPath)) {
                     string trimmed = line.Trim();
@@ -104,6 +130,9 @@ class DuoRdpWrapper {
                         return Path.Combine(duoDir, "config", val);
                 }
             } catch { }
+            // Use the same stem as the conf file (e.g. cosmo.conf -> cosmo.log)
+            string stem = Path.GetFileNameWithoutExtension(confPath);
+            return Path.Combine(duoDir, "config", stem + ".log");
         }
         return Path.Combine(duoDir, "config", "Games.log");
     }

@@ -310,25 +310,30 @@ begin
 
 
   // ----------------------------------------------------------
-  // Fix 5: Games.conf - enable debug logging to capture Moonlight resolution
-  // The wrapper reads "GET /launch?mode=WxHxFPS" from Games.log (debug level) to know
-  // exactly the resolution requested by Moonlight.
+  // Fix 5: Sunshine/Apollo conf - enable debug logging to capture Moonlight resolution
+  // Apollo names the conf file after sunshine_name (e.g. cosmo.conf, Games.conf).
+  // We scan config/*.conf, skip duo_wrapper.conf, and patch the first file that
+  // contains min_log_level or log_path — those keys only appear in the main conf.
   // ----------------------------------------------------------
-  if FileExists(DuoDir + '\config\Games.conf') then begin
-    Exec('powershell.exe',
-      '-NoProfile -Command "' +
-      '$f = ''' + DuoDir + '\config\Games.conf''; ' +
-      '$c = Get-Content $f -Raw; ' +
-      '$c = $c -replace ''min_log_level\s*=\s*\w+'', ''min_log_level = debug''; ' +
-      '$c = $c -replace ''virtual_sink\s*=\s*[^\r\n]*'', ''virtual_sink =''; ' +
-      '$c | Set-Content $f -NoNewline; ' +
-      '"',
-      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    // Starts the service with the new log level applied
-    Exec('sc.exe', 'start DuoManagerService', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Exec('powershell.exe', '-NoProfile -Command "Start-Sleep -Seconds 3"',
-      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  end;
+  Exec('powershell.exe',
+    '-NoProfile -Command "' +
+    '$dir = ''' + DuoDir + '\config''; ' +
+    '$f = Get-ChildItem $dir -Filter *.conf | ' +
+    '  Where-Object { $_.Name -ne ''duo_wrapper.conf'' } | ' +
+    '  Where-Object { (Get-Content $_.FullName -Raw) -match ''min_log_level|log_path'' } | ' +
+    '  Select-Object -First 1 -ExpandProperty FullName; ' +
+    'if ($f) { ' +
+    '  $c = Get-Content $f -Raw; ' +
+    '  $c = $c -replace ''min_log_level\s*=\s*\w+'', ''min_log_level = debug''; ' +
+    '  $c = $c -replace ''virtual_sink\s*=\s*[^\r\n]*'', ''virtual_sink =''; ' +
+    '  $c | Set-Content $f -NoNewline; ' +
+    '} ' +
+    '"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  // Starts the service with the new log level applied
+  Exec('sc.exe', 'start DuoManagerService', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('powershell.exe', '-NoProfile -Command "Start-Sleep -Seconds 3"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
   // ----------------------------------------------------------
   // Fix 6: Duo.exe binary patch - zero out hardcoded "Remote Audio" default
@@ -447,16 +452,21 @@ begin
       Exec('cmd.exe', '/c copy /y "' + DuoDir + '\Duo_orig.exe" "' + DuoDir + '\Duo.exe"',
         '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-    // Restores min_log_level = none in Games.conf
-    if FileExists(DuoDir + '\config\Games.conf') then
-      Exec('powershell.exe',
-        '-NoProfile -Command "' +
-        '$f = ''' + DuoDir + '\config\Games.conf''; ' +
-        '$c = Get-Content $f -Raw; ' +
-        '$c = $c -replace ''min_log_level\s*=\s*\w+'', ''min_log_level = none''; ' +
-        '$c | Set-Content $f -NoNewline; ' +
-        '"',
-        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    // Restores min_log_level = none in the active Sunshine/Apollo conf
+    Exec('powershell.exe',
+      '-NoProfile -Command "' +
+      '$dir = ''' + DuoDir + '\config''; ' +
+      '$f = Get-ChildItem $dir -Filter *.conf | ' +
+      '  Where-Object { $_.Name -ne ''duo_wrapper.conf'' } | ' +
+      '  Where-Object { (Get-Content $_.FullName -Raw) -match ''min_log_level|log_path'' } | ' +
+      '  Select-Object -First 1 -ExpandProperty FullName; ' +
+      'if ($f) { ' +
+      '  $c = Get-Content $f -Raw; ' +
+      '  $c = $c -replace ''min_log_level\s*=\s*\w+'', ''min_log_level = none''; ' +
+      '  $c | Set-Content $f -NoNewline; ' +
+      '} ' +
+      '"',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
     // Restarts the service
     Exec('sc.exe', 'start DuoManagerService', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
