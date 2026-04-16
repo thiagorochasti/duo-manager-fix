@@ -315,9 +315,6 @@ begin
   // exactly the resolution requested by Moonlight.
   // ----------------------------------------------------------
   if FileExists(DuoDir + '\config\Games.conf') then begin
-    // Remove read-only before editing (in case of reinstall)
-    Exec('attrib.exe', '-R "' + DuoDir + '\config\Games.conf"',
-      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec('powershell.exe',
       '-NoProfile -Command "' +
       '$f = ''' + DuoDir + '\config\Games.conf''; ' +
@@ -327,14 +324,55 @@ begin
       '$c | Set-Content $f -NoNewline; ' +
       '"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    // Lock the file as read-only so Duo cannot write "Remote Audio" back on reconnect
-    Exec('attrib.exe', '+R "' + DuoDir + '\config\Games.conf"',
-      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     // Starts the service with the new log level applied
     Exec('sc.exe', 'start DuoManagerService', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Exec('powershell.exe', '-NoProfile -Command "Start-Sleep -Seconds 3"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   end;
+
+  // ----------------------------------------------------------
+  // Fix 6: Duo.exe binary patch - zero out hardcoded "Remote Audio" default
+  // Duo.exe contains a config defaults table where "Remote Audio" is the
+  // hardcoded default value for virtual_sink. It rewrites this on every
+  // session reconnect. We patch the 12 bytes to null so Duo writes
+  // virtual_sink = (empty) instead, which is required for audio to work.
+  // Pattern: "Remote Audio\x00\x00\x00\x00virtual_sink" (unique in binary)
+  // ----------------------------------------------------------
+  Exec('takeown.exe', '/f "' + DuoDir + '\Duo.exe" /a',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('icacls.exe', '"' + DuoDir + '\Duo.exe" /grant Administrators:F',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  if not FileExists(DuoDir + '\Duo_orig.exe') then begin
+    Exec('cmd.exe', '/c copy /y "' + DuoDir + '\Duo.exe" "' + DuoDir + '\Duo_orig.exe"',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    if (ResultCode <> 0) or (not FileExists(DuoDir + '\Duo_orig.exe')) then
+      AbortInstall('Duo.exe binary patch - backup',
+        'Could not create backup Duo_orig.exe (cmd copy returned ' + IntToStr(ResultCode) + ').',
+        'Make sure Duo Manager service is stopped and try again.');
+  end;
+
+  SaveStringToFile(ExpandConstant('{tmp}\patch_duo.ps1'),
+    '$exe = ''' + DuoDir + '\Duo.exe'';' + #13#10 +
+    '$bytes = [System.IO.File]::ReadAllBytes($exe);' + #13#10 +
+    '$pattern = [byte[]](0x52,0x65,0x6D,0x6F,0x74,0x65,0x20,0x41,0x75,0x64,0x69,0x6F,0x00,0x00,0x00,0x00,0x76,0x69,0x72,0x74,0x75,0x61,0x6C,0x5F,0x73,0x69,0x6E,0x6B);' + #13#10 +
+    '$idx = -1;' + #13#10 +
+    'for ($i = 0; $i -le ($bytes.Length - $pattern.Length); $i++) {' + #13#10 +
+    '  $ok = $true;' + #13#10 +
+    '  for ($j = 0; $j -lt $pattern.Length; $j++) { if ($bytes[$i+$j] -ne $pattern[$j]) { $ok = $false; break } };' + #13#10 +
+    '  if ($ok) { $idx = $i; break }' + #13#10 +
+    '};' + #13#10 +
+    'if ($idx -ge 0) { for ($k = 0; $k -lt 12; $k++) { $bytes[$idx+$k] = 0 }; [System.IO.File]::WriteAllBytes($exe, $bytes); exit 0 } else { exit 1 }',
+    False);
+
+  Exec('powershell.exe',
+    '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{tmp}\patch_duo.ps1') + '"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if ResultCode <> 0 then
+    AbortInstall('Duo.exe binary patch - apply',
+      'Pattern "Remote Audio" not found in Duo.exe (ResultCode=' + IntToStr(ResultCode) + ').' + #13#10 +
+      'This Duo version may already be patched or uses a different format.',
+      'You can continue using the fix without this patch. Audio may still work.');
 
   // ----------------------------------------------------------
   // Post-installation validation by component
@@ -362,6 +400,11 @@ begin
     StatusMsg := StatusMsg + '  [OK] Web UI assets' + #13#10
   else
     StatusMsg := StatusMsg + '  [!!] Web UI assets - one or more files missing' + #13#10;
+
+  if FileExists(DuoDir + '\Duo_orig.exe') then
+    StatusMsg := StatusMsg + '  [OK] Duo.exe binary patch (virtual_sink default cleared)' + #13#10
+  else
+    StatusMsg := StatusMsg + '  [!!] Duo.exe binary patch - Duo_orig.exe backup not found' + #13#10;
 
   if IsSunshine then
     StatusMsg := StatusMsg + #13#10 + 'NOTE: You selected Sunshine native engine.' + #13#10 +
@@ -401,10 +444,13 @@ begin
       Exec('cmd.exe', '/c copy /y "' + DuoDir + '\sunshine_orig.exe" "' + DuoDir + '\sunshine.exe"',
         '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-    // Restores min_log_level = none in Games.conf and removes read-only lock
-    if FileExists(DuoDir + '\config\Games.conf') then begin
-      Exec('attrib.exe', '-R "' + DuoDir + '\config\Games.conf"',
+    // Restores Duo_orig.exe -> Duo.exe (removes binary patch)
+    if FileExists(DuoDir + '\Duo_orig.exe') then
+      Exec('cmd.exe', '/c copy /y "' + DuoDir + '\Duo_orig.exe" "' + DuoDir + '\Duo.exe"',
         '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+    // Restores min_log_level = none in Games.conf
+    if FileExists(DuoDir + '\config\Games.conf') then
       Exec('powershell.exe',
         '-NoProfile -Command "' +
         '$f = ''' + DuoDir + '\config\Games.conf''; ' +
@@ -413,7 +459,6 @@ begin
         '$c | Set-Content $f -NoNewline; ' +
         '"',
         '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    end;
 
     // Restarts the service
     Exec('sc.exe', 'start DuoManagerService', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
