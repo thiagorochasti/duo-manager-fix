@@ -59,7 +59,7 @@ Name: "engine_sunshine"; Description: "Sunshine Nativo — suporte melhorado a H
 
 [Files]
 ; Binarios compilados (sempre instalados)
-Source: "..\bin\DuoRdpWrapper.exe";      DestDir: "{tmp}"; Flags: deleteafterinstall
+Source: "..\release\DuoRdpWrapper.exe";  DestDir: "{tmp}"; Flags: deleteafterinstall
 
 
 ; === Apollo engine ===
