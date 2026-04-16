@@ -196,7 +196,11 @@ class DuoRdpWrapper {
 
     static int Main(string[] args) {
         string log    = @"C:\Users\Public\duordp_args.txt";
-        string duoDir = @"C:\Program Files\Duo";
+        // Derive Duo install directory from the wrapper's own location.
+        // DuoRdp.exe (this wrapper) always lives inside the Duo install folder,
+        // so this works regardless of where Duo was installed.
+        string duoDir = Path.GetDirectoryName(
+            Process.GetCurrentProcess().MainModule.FileName);
 
         using (var sw = new StreamWriter(log, true)) {
             sw.WriteLine("=== DuoRdpWrapper invoked: " + DateTime.Now);
