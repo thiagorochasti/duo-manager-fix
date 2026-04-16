@@ -368,11 +368,9 @@ begin
   Exec('powershell.exe',
     '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{tmp}\patch_duo.ps1') + '"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  if ResultCode <> 0 then
-    AbortInstall('Duo.exe binary patch - apply',
-      'Pattern "Remote Audio" not found in Duo.exe (ResultCode=' + IntToStr(ResultCode) + ').' + #13#10 +
-      'This Duo version may already be patched or uses a different format.',
-      'You can continue using the fix without this patch. Audio may still work.');
+  // Fix 6 is optional — if the pattern is not found (different Duo version),
+  // skip silently and let the rest of the installation complete normally.
+  // The DuoRdpWrapper resolution fix still works without this patch.
 
   // ----------------------------------------------------------
   // Post-installation validation by component
