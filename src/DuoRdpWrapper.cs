@@ -100,20 +100,27 @@ class DuoRdpWrapper {
         // that share the same keys but point to the wrong log file.
         string gamesConf = Path.Combine(configDir, "Games.conf");
         if (File.Exists(gamesConf)) return gamesConf;
-        // Fallback: scan for another conf with log_path or min_log_level (e.g. cosmo.conf)
+            // Fallback: scan for another conf with log_path (e.g. cosmo.conf).
+        // We require log_path specifically — per-session confs (Guest.conf, etc.) share
+        // min_log_level but never declare log_path, so this avoids picking the wrong file.
         try {
+            string minLogCandidate = null;
             foreach (string f in Directory.GetFiles(configDir, "*.conf")) {
                 string name = Path.GetFileName(f);
                 if (name.Equals("duo_wrapper.conf", StringComparison.OrdinalIgnoreCase)) continue;
                 try {
+                    bool hasLogPath   = false;
+                    bool hasMinLog    = false;
                     foreach (string line in File.ReadAllLines(f)) {
                         string t = line.Trim();
-                        if (t.StartsWith("log_path", StringComparison.OrdinalIgnoreCase) ||
-                            t.StartsWith("min_log_level", StringComparison.OrdinalIgnoreCase))
-                            return f;
+                        if (t.StartsWith("log_path", StringComparison.OrdinalIgnoreCase))    hasLogPath = true;
+                        if (t.StartsWith("min_log_level", StringComparison.OrdinalIgnoreCase)) hasMinLog = true;
                     }
+                    if (hasLogPath) return f;                    // main conf: has log_path
+                    if (hasMinLog && minLogCandidate == null) minLogCandidate = f; // last resort
                 } catch { }
             }
+            if (minLogCandidate != null) return minLogCandidate;
         } catch { }
         return null;
     }
@@ -190,7 +197,8 @@ class DuoRdpWrapper {
                 if (!m.Success) continue;
                 // Reject entries older than 60 seconds — they belong to a previous session
                 DateTime ts;
-                if (DateTime.TryParse(m.Groups[1].Value, out ts) &&
+                if (DateTime.TryParse(m.Groups[1].Value, CultureInfo.InvariantCulture,
+                        DateTimeStyles.None, out ts) &&
                     (now - ts).TotalSeconds > 60) break;
                 int w = int.Parse(m.Groups[2].Value);
                 int h = int.Parse(m.Groups[3].Value);
@@ -202,14 +210,22 @@ class DuoRdpWrapper {
 
     // Reads the streaming resolution from Games.log (Sunshine/Apollo with min_log_level=info).
     // Sunshine logs "Desktop resolution [WxH]" before invoking DuoRdp.exe.
-    // Searches from end to start to get the most recent session.
+    // Searches from end to start to get the most recent session. Reads only the last 512KB.
     static bool TryReadMoonlightResolution(string duoDir, out int width, out int height) {
         width = 0;
         height = 0;
         string logPath = GetLogPath(duoDir);
         if (!File.Exists(logPath)) return false;
         try {
-            string[] lines = File.ReadAllLines(logPath);
+            const int maxBytes = 512 * 1024;
+            string content;
+            using (var fs = new FileStream(logPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)) {
+                long start = Math.Max(0, fs.Length - maxBytes);
+                fs.Seek(start, SeekOrigin.Begin);
+                using (var sr = new StreamReader(fs))
+                    content = sr.ReadToEnd();
+            }
+            string[] lines = content.Split('\n');
             Regex reDesktop = new Regex(@"Desktop resolution \[(\d+)x(\d+)\]", RegexOptions.IgnoreCase);
             for (int i = lines.Length - 1; i >= 0; i--) {
                 Match m = reDesktop.Match(lines[i]);
@@ -227,13 +243,15 @@ class DuoRdpWrapper {
         return false;
     }
 
-    // Reads dd_manual_resolution from Apollo's sunshine.conf (secondary fallback).
+    // Reads dd_manual_resolution from the active Apollo/Sunshine conf (secondary fallback).
+    // Uses GetConfPath() so it finds Games.conf (or whatever the active conf is named)
+    // instead of relying on the hardcoded "sunshine.conf" name which Duo does not use.
     // Line format: "dd_manual_resolution = 1920x1080" (with or without spaces).
     static bool TryReadApolloResolution(string duoDir, out int width, out int height) {
         width = 0;
         height = 0;
-        string confPath = Path.Combine(duoDir, "config", "sunshine.conf");
-        if (!File.Exists(confPath)) return false;
+        string confPath = GetConfPath(duoDir);
+        if (confPath == null || !File.Exists(confPath)) return false;
         try {
             foreach (string line in File.ReadAllLines(confPath)) {
                 string trimmed = line.Trim();
