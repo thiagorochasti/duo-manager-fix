@@ -96,6 +96,11 @@ class DuoRdpWrapper {
     static string GetConfPath(string duoDir) {
         string configDir = Path.Combine(duoDir, "config");
         if (!Directory.Exists(configDir)) return null;
+        // Always prefer Games.conf — Duo may create per-session conf files (e.g. Guest.conf)
+        // that share the same keys but point to the wrong log file.
+        string gamesConf = Path.Combine(configDir, "Games.conf");
+        if (File.Exists(gamesConf)) return gamesConf;
+        // Fallback: scan for another conf with log_path or min_log_level (e.g. cosmo.conf)
         try {
             foreach (string f in Directory.GetFiles(configDir, "*.conf")) {
                 string name = Path.GetFileName(f);
@@ -110,9 +115,7 @@ class DuoRdpWrapper {
                 } catch { }
             }
         } catch { }
-        // Last resort: fall back to the conventional name
-        string fallback = Path.Combine(configDir, "Games.conf");
-        return File.Exists(fallback) ? fallback : null;
+        return null;
     }
 
     // Reads log_path from the active Sunshine/Apollo conf to find the actual log file.
