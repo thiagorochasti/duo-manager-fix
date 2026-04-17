@@ -148,6 +148,32 @@ class DuoRdpWrapper {
         return Path.Combine(duoDir, "config", "Games.log");
     }
 
+    // Removes dd_resolution_option and dd_manual_resolution from the active conf so
+    // Sunshine does not lock the virtual display to the host monitor resolution.
+    // Duo writes these on every guest connect based on the physical monitor; without
+    // this cleanup, Sunshine overrides the display to e.g. 2560x1440 regardless of
+    // what Moonlight requested, and the RDP session resolution has no effect.
+    static void ClearDisplayResolutionLock(string duoDir) {
+        string confPath = GetConfPath(duoDir);
+        if (confPath == null || !File.Exists(confPath)) return;
+        try {
+            string[] lines = File.ReadAllLines(confPath);
+            bool changed = false;
+            var kept = new System.Collections.Generic.List<string>(lines.Length);
+            foreach (string line in lines) {
+                string t = line.Trim();
+                if (t.StartsWith("dd_resolution_option", StringComparison.OrdinalIgnoreCase) ||
+                    t.StartsWith("dd_manual_resolution", StringComparison.OrdinalIgnoreCase)) {
+                    changed = true;
+                    continue;
+                }
+                kept.Add(line);
+            }
+            if (changed)
+                File.WriteAllLines(confPath, kept.ToArray());
+        } catch { }
+    }
+
     // Reads sunshine_name from the active Sunshine/Apollo conf.
     // Falls back to null when the setting is absent (caller should use Environment.MachineName).
     static string ReadSunshineName(string duoDir) {
@@ -289,6 +315,10 @@ class DuoRdpWrapper {
             for (int i = 0; i < args.Length; i++)
                 sw.WriteLine("  [" + i + "] = " + args[i]);
         }
+
+        // Remove dd_resolution_option/dd_manual_resolution so Sunshine does not lock
+        // the virtual display to the host monitor resolution before the RDP session starts.
+        ClearDisplayResolutionLock(duoDir);
 
         string[] newArgs;
         int currentW = 0, currentH = 0;
