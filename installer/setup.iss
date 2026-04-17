@@ -331,11 +331,11 @@ begin
     '"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   // ----------------------------------------------------------
-  // Fix 6: Duo.exe binary patch - zero out hardcoded "Remote Audio" default
-  // Duo.exe contains a config defaults table where "Remote Audio" is the
-  // hardcoded default value for virtual_sink. It rewrites this on every
-  // session reconnect. We patch the 12 bytes to null so Duo writes
-  // virtual_sink = (empty) instead, which is required for audio to work.
+  // Fix 6: Duo.exe binary patch - zero out hardcoded virtual_sink config entry
+  // Duo.exe has a config defaults table with "Remote Audio" as the default for
+  // virtual_sink. It rewrites this on every session reconnect, breaking audio.
+  // We zero the full 28-byte pattern (value + key name) so Duo skips the entry
+  // entirely, leaving virtual_sink absent from Games.conf (null, not empty string).
   // Pattern: "Remote Audio\x00\x00\x00\x00virtual_sink" (unique in binary)
   // ----------------------------------------------------------
   Exec('takeown.exe', '/f "' + DuoDir + '\Duo.exe" /a',
@@ -362,7 +362,7 @@ begin
     '  for ($j = 0; $j -lt $pattern.Length; $j++) { if ($bytes[$i+$j] -ne $pattern[$j]) { $ok = $false; break } };' + #13#10 +
     '  if ($ok) { $idx = $i; break }' + #13#10 +
     '};' + #13#10 +
-    'if ($idx -ge 0) { for ($k = 0; $k -lt 12; $k++) { $bytes[$idx+$k] = 0 }; [System.IO.File]::WriteAllBytes($exe, $bytes); exit 0 } else { exit 1 }',
+    'if ($idx -ge 0) { for ($k = 0; $k -lt $pattern.Length; $k++) { $bytes[$idx+$k] = 0 }; [System.IO.File]::WriteAllBytes($exe, $bytes); exit 0 } else { exit 1 }',
     False);
 
   Exec('powershell.exe',
