@@ -93,34 +93,44 @@ class DuoRdpWrapper {
     // Apollo names all config files after sunshine_name (e.g. cosmo.conf, Games.conf).
     // We scan config/*.conf, skip duo_wrapper.conf, and return the first file that
     // contains "log_path" or "min_log_level" — those keys only appear in the main conf.
+    // Finds the active Sunshine/Apollo config by picking the conf whose log file was
+    // most recently written — that is always the currently running Sunshine session.
+    // This handles machines with multiple conf files (e.g. Games.conf from an old install
+    // alongside Notebook.conf from a new one): the stale conf's log is older and loses.
+    // Falls back to any conf that declares log_path when no log file exists yet (first run).
     static string GetConfPath(string duoDir) {
         string configDir = Path.Combine(duoDir, "config");
         if (!Directory.Exists(configDir)) return null;
-        // Always prefer Games.conf — Duo may create per-session conf files (e.g. Guest.conf)
-        // that share the same keys but point to the wrong log file.
-        string gamesConf = Path.Combine(configDir, "Games.conf");
-        if (File.Exists(gamesConf)) return gamesConf;
-            // Fallback: scan for another conf with log_path (e.g. cosmo.conf).
-        // We require log_path specifically — per-session confs (Guest.conf, etc.) share
-        // min_log_level but never declare log_path, so this avoids picking the wrong file.
         try {
-            string minLogCandidate = null;
+            string bestConf     = null;
+            DateTime bestTime   = DateTime.MinValue;
+            string fallbackConf = null;
+
             foreach (string f in Directory.GetFiles(configDir, "*.conf")) {
                 string name = Path.GetFileName(f);
                 if (name.Equals("duo_wrapper.conf", StringComparison.OrdinalIgnoreCase)) continue;
                 try {
-                    bool hasLogPath   = false;
-                    bool hasMinLog    = false;
+                    string logVal = null;
                     foreach (string line in File.ReadAllLines(f)) {
                         string t = line.Trim();
-                        if (t.StartsWith("log_path", StringComparison.OrdinalIgnoreCase))    hasLogPath = true;
-                        if (t.StartsWith("min_log_level", StringComparison.OrdinalIgnoreCase)) hasMinLog = true;
+                        if (!t.StartsWith("log_path", StringComparison.OrdinalIgnoreCase)) continue;
+                        int eq = t.IndexOf('=');
+                        if (eq >= 0) logVal = t.Substring(eq + 1).Trim();
+                        break;
                     }
-                    if (hasLogPath) return f;                    // main conf: has log_path
-                    if (hasMinLog && minLogCandidate == null) minLogCandidate = f; // last resort
+                    if (string.IsNullOrEmpty(logVal)) continue;
+
+                    string logFile = Path.Combine(configDir, logVal);
+                    if (File.Exists(logFile)) {
+                        DateTime lw = File.GetLastWriteTime(logFile);
+                        if (lw > bestTime) { bestTime = lw; bestConf = f; }
+                    } else if (fallbackConf == null) {
+                        fallbackConf = f;
+                    }
                 } catch { }
             }
-            if (minLogCandidate != null) return minLogCandidate;
+            if (bestConf != null) return bestConf;
+            if (fallbackConf != null) return fallbackConf;
         } catch { }
         return null;
     }
@@ -159,18 +169,21 @@ class DuoRdpWrapper {
         try {
             string[] lines = File.ReadAllLines(confPath);
             bool changed = false;
-            var kept = new System.Collections.Generic.List<string>(lines.Length);
+            var result = new System.Collections.Generic.List<string>(lines.Length);
             foreach (string line in lines) {
                 string t = line.Trim();
-                if (t.StartsWith("dd_resolution_option", StringComparison.OrdinalIgnoreCase) ||
-                    t.StartsWith("dd_manual_resolution", StringComparison.OrdinalIgnoreCase)) {
+                // Change "manual" -> "disabled" so Sunshine stops locking the virtual
+                // display resolution, while keeping the key present so Duo still boots.
+                if (t.StartsWith("dd_resolution_option", StringComparison.OrdinalIgnoreCase) &&
+                    t.IndexOf("manual", StringComparison.OrdinalIgnoreCase) >= 0) {
+                    result.Add("dd_resolution_option = disabled");
                     changed = true;
                     continue;
                 }
-                kept.Add(line);
+                result.Add(line);
             }
             if (changed)
-                File.WriteAllLines(confPath, kept.ToArray());
+                File.WriteAllLines(confPath, result.ToArray());
         } catch { }
     }
 
@@ -258,7 +271,9 @@ class DuoRdpWrapper {
                 if (m.Success) {
                     int w = int.Parse(m.Groups[1].Value);
                     int h = int.Parse(m.Groups[2].Value);
-                    if (w > 0 && h > 0) {
+                    // Ignore 640x480 and other sub-800x600 entries — Sunshine logs this
+                    // resolution during encoder testing at startup before any client connects.
+                    if (w >= 800 && h >= 600) {
                         width  = w;
                         height = h;
                         return true;
