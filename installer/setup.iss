@@ -44,17 +44,17 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Messages]
 WelcomeLabel1=Welcome to the %1 Setup Wizard
-WelcomeLabel2=This installer fixes known issues in Duo Manager 1.5.6:%n%n  1. Resolution locked at 640x480%n  2. Broken web management interface%n%nYou can choose between Apollo (stable) or native Sunshine (experimental).%n%nPrerequisite: Duo Manager 1.5.6 must be installed.%n%nClick Next to continue.
+WelcomeLabel2=This installer fixes known issues in Duo Manager 1.5.6:%n%n  1. Resolution locked at 640x480%n  2. Broken web management interface%n%nNative Sunshine is the recommended engine. Apollo is available as a legacy option.%n%nPrerequisite: Duo Manager 1.5.6 must be installed.%n%nClick Next to continue.
 FinishedLabel=Installation complete!%n%nConnect from Moonlight and test.
 
 
 [Types]
-Name: "apollo";   Description: "Apollo 0.4.6 (stable - recommended)"
-Name: "sunshine"; Description: "Native Sunshine (experimental - better HID/DualSense support)"
+Name: "sunshine"; Description: "Native Sunshine (recommended)"
+Name: "apollo";   Description: "Apollo 0.4.6 (legacy)"
 
 [Components]
-Name: "engine_apollo";   Description: "Apollo 0.4.6 - tested and stable streaming engine";                    Types: apollo;   Flags: exclusive
-Name: "engine_sunshine"; Description: "Native Sunshine - improved HID, DualSense and multi-session support"; Types: sunshine; Flags: exclusive
+Name: "engine_sunshine"; Description: "Native Sunshine - recommended engine (better HID, DualSense and multi-session support)"; Types: sunshine; Flags: exclusive
+Name: "engine_apollo";   Description: "Apollo 0.4.6 - legacy option";                                                          Types: apollo;   Flags: exclusive
 
 [Files]
 ; Compiled binaries (always installed)
