@@ -413,8 +413,15 @@ class DuoRdpWrapper {
                 // Priority 4: Desktop resolution from Games.log (RDP virtual display resolution)
                 // Priority 5: dd_manual_resolution from sunshine.conf (Apollo static config)
                 // Fallback: use whatever Duo sent
-                int rW, rH;
-                if (TryReadMoonlightLaunchResolution(duoDir, out rW, out rH)) {
+                int rW = 0, rH = 0;
+                // Poll up to 25 s for Sunshine to write the "mode -- WxHxR" line.
+                // On first start the log is empty; the line appears ~15 s after launch.
+                DateTime waitUntil = DateTime.Now.AddSeconds(25);
+                while (!TryReadMoonlightLaunchResolution(duoDir, out rW, out rH)) {
+                    if (DateTime.Now >= waitUntil) break;
+                    System.Threading.Thread.Sleep(300);
+                }
+                if (rW > 0 && rH > 0) {
                     targetW   = rW;
                     targetH   = rH;
                     resSource = "Moonlight (GET /launch mode=)";
