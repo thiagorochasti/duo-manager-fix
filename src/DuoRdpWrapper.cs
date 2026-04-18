@@ -163,9 +163,10 @@ class DuoRdpWrapper {
     // before the RDP session starts. If the keys already exist they are updated in-place;
     // otherwise they are appended. Falls back to setting dd_resolution_option = disabled
     // when width/height are 0 (resolution unknown).
-    static void SetDisplayResolution(string duoDir, int width, int height) {
+    // Returns true if the file content actually changed on disk.
+    static bool SetDisplayResolution(string duoDir, int width, int height) {
         string confPath = GetConfPath(duoDir);
-        if (confPath == null || !File.Exists(confPath)) return;
+        if (confPath == null || !File.Exists(confPath)) return false;
         try {
             string[] lines = File.ReadAllLines(confPath);
             bool hadOption = false, hadManual = false;
@@ -188,7 +189,33 @@ class DuoRdpWrapper {
                 result.Add(width > 0 ? "dd_resolution_option = manual" : "dd_resolution_option = disabled");
             if (!hadManual && width > 0)
                 result.Add("dd_manual_resolution = " + width + "x" + height);
-            File.WriteAllLines(confPath, result.ToArray());
+
+            // Only write and report change if content actually differs, to avoid
+            // unnecessary service restarts on repeat sessions with same resolution.
+            string[] newLines = result.ToArray();
+            if (newLines.Length != lines.Length) { File.WriteAllLines(confPath, newLines); return true; }
+            for (int i = 0; i < newLines.Length; i++) {
+                if (newLines[i] != lines[i]) { File.WriteAllLines(confPath, newLines); return true; }
+            }
+            return false;
+        } catch { return false; }
+    }
+
+    // Spawns a detached cmd that waits a few seconds, then restarts DuoService.
+    // Sunshine only reads dd_manual_resolution at service startup, so when we update
+    // the conf mid-session the change doesn't take effect until the service restarts.
+    // The detached process survives the wrapper's exit because it is not added to
+    // our Job object and is launched with UseShellExecute=true.
+    static void ScheduleServiceRestart() {
+        try {
+            var psi = new ProcessStartInfo {
+                FileName    = "cmd.exe",
+                Arguments   = "/c timeout /t 4 /nobreak > nul & sc stop DuoService > nul 2>&1 & sc start DuoService > nul 2>&1",
+                UseShellExecute = true,
+                CreateNoWindow  = true,
+                WindowStyle     = ProcessWindowStyle.Hidden
+            };
+            Process.Start(psi);
         } catch { }
     }
 
@@ -338,7 +365,10 @@ class DuoRdpWrapper {
 
         // Temporarily disable the resolution lock so Sunshine does not clamp the virtual
         // display to the physical monitor while we poll for the real Moonlight resolution.
+        // Track whether we end up changing the conf with a real resolution in this run —
+        // if yes, schedule a service restart at the end so Sunshine reloads the new values.
         SetDisplayResolution(duoDir, 0, 0);
+        bool confChangedThisRun = false;
 
         string[] newArgs;
         int currentW = 0, currentH = 0;
@@ -451,7 +481,8 @@ class DuoRdpWrapper {
                 // Write the resolved resolution into Games.conf so Sunshine's virtual
                 // display driver uses the right resolution when the RDP session is created.
                 // This must happen BEFORE DuoRdp_orig.exe is called.
-                SetDisplayResolution(duoDir, targetW, targetH);
+                if (SetDisplayResolution(duoDir, targetW, targetH))
+                    confChangedThisRun = true;
 
                 newArgs[5] = targetW.ToString();
                 newArgs[6] = targetH.ToString();
@@ -522,7 +553,8 @@ class DuoRdpWrapper {
                                      " -> " + rW + "x" + rH +
                                      ". Updating conf and restarting DuoRdp_orig.exe.");
 
-                    SetDisplayResolution(duoDir, rW, rH);
+                    if (SetDisplayResolution(duoDir, rW, rH))
+                        confChangedThisRun = true;
 
                     try { proc.Kill(); } catch { }
                     proc.WaitForExit();
@@ -535,8 +567,17 @@ class DuoRdpWrapper {
                 }
             }
 
-            if (!resolutionChanged)
+            if (!resolutionChanged) {
+                // If Games.conf changed during this run, Sunshine is still running with
+                // the old values in memory. Schedule a detached service restart so the
+                // next Moonlight connection reloads the updated dd_manual_resolution.
+                if (confChangedThisRun) {
+                    using (var sw = new StreamWriter(log, true))
+                        sw.WriteLine("  => Games.conf was updated. Scheduling DuoService restart (4s delay) so Sunshine reloads.");
+                    ScheduleServiceRestart();
+                }
                 return proc.ExitCode;
+            }
             // else loop back and restart with the new resolution
         }
     }
