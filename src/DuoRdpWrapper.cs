@@ -158,32 +158,37 @@ class DuoRdpWrapper {
         return Path.Combine(duoDir, "config", "Games.log");
     }
 
-    // Removes dd_resolution_option and dd_manual_resolution from the active conf so
-    // Sunshine does not lock the virtual display to the host monitor resolution.
-    // Duo writes these on every guest connect based on the physical monitor; without
-    // this cleanup, Sunshine overrides the display to e.g. 2560x1440 regardless of
-    // what Moonlight requested, and the RDP session resolution has no effect.
-    static void ClearDisplayResolutionLock(string duoDir) {
+    // Writes dd_manual_resolution = WxH and dd_resolution_option = manual to the active conf,
+    // so Sunshine sets the virtual display to exactly the Moonlight-requested resolution
+    // before the RDP session starts. If the keys already exist they are updated in-place;
+    // otherwise they are appended. Falls back to setting dd_resolution_option = disabled
+    // when width/height are 0 (resolution unknown).
+    static void SetDisplayResolution(string duoDir, int width, int height) {
         string confPath = GetConfPath(duoDir);
         if (confPath == null || !File.Exists(confPath)) return;
         try {
             string[] lines = File.ReadAllLines(confPath);
-            bool changed = false;
-            var result = new System.Collections.Generic.List<string>(lines.Length);
+            bool hadOption = false, hadManual = false;
+            var result = new System.Collections.Generic.List<string>(lines.Length + 2);
             foreach (string line in lines) {
                 string t = line.Trim();
-                // Change "manual" -> "disabled" so Sunshine stops locking the virtual
-                // display resolution, while keeping the key present so Duo still boots.
-                if (t.StartsWith("dd_resolution_option", StringComparison.OrdinalIgnoreCase) &&
-                    t.IndexOf("manual", StringComparison.OrdinalIgnoreCase) >= 0) {
-                    result.Add("dd_resolution_option = disabled");
-                    changed = true;
+                if (t.StartsWith("dd_resolution_option", StringComparison.OrdinalIgnoreCase)) {
+                    result.Add(width > 0 ? "dd_resolution_option = manual" : "dd_resolution_option = disabled");
+                    hadOption = true;
+                    continue;
+                }
+                if (t.StartsWith("dd_manual_resolution", StringComparison.OrdinalIgnoreCase)) {
+                    if (width > 0) { result.Add("dd_manual_resolution = " + width + "x" + height); hadManual = true; }
+                    // drop the line when width==0 (no resolution known)
                     continue;
                 }
                 result.Add(line);
             }
-            if (changed)
-                File.WriteAllLines(confPath, result.ToArray());
+            if (!hadOption)
+                result.Add(width > 0 ? "dd_resolution_option = manual" : "dd_resolution_option = disabled");
+            if (!hadManual && width > 0)
+                result.Add("dd_manual_resolution = " + width + "x" + height);
+            File.WriteAllLines(confPath, result.ToArray());
         } catch { }
     }
 
@@ -331,9 +336,9 @@ class DuoRdpWrapper {
                 sw.WriteLine("  [" + i + "] = " + args[i]);
         }
 
-        // Remove dd_resolution_option/dd_manual_resolution so Sunshine does not lock
-        // the virtual display to the host monitor resolution before the RDP session starts.
-        ClearDisplayResolutionLock(duoDir);
+        // Temporarily disable the resolution lock so Sunshine does not clamp the virtual
+        // display to the physical monitor while we poll for the real Moonlight resolution.
+        SetDisplayResolution(duoDir, 0, 0);
 
         string[] newArgs;
         int currentW = 0, currentH = 0;
@@ -414,9 +419,9 @@ class DuoRdpWrapper {
                 // Priority 5: dd_manual_resolution from sunshine.conf (Apollo static config)
                 // Fallback: use whatever Duo sent
                 int rW = 0, rH = 0;
-                // Poll up to 25 s for Sunshine to write the "mode -- WxHxR" line.
-                // On first start the log is empty; the line appears ~15 s after launch.
-                DateTime waitUntil = DateTime.Now.AddSeconds(25);
+                // Poll up to 50 s for Sunshine to write the "mode -- WxHxR" line.
+                // Sunshine clears the log at session start; the line appears ~25-30 s later.
+                DateTime waitUntil = DateTime.Now.AddSeconds(50);
                 while (!TryReadMoonlightLaunchResolution(duoDir, out rW, out rH)) {
                     if (DateTime.Now >= waitUntil) break;
                     System.Threading.Thread.Sleep(300);
@@ -442,6 +447,11 @@ class DuoRdpWrapper {
                     targetH   = rH;
                     resSource = "Apollo config (dd_manual_resolution)";
                 }
+
+                // Write the resolved resolution into Games.conf so Sunshine's virtual
+                // display driver uses the right resolution when the RDP session is created.
+                // This must happen BEFORE DuoRdp_orig.exe is called.
+                SetDisplayResolution(duoDir, targetW, targetH);
 
                 newArgs[5] = targetW.ToString();
                 newArgs[6] = targetH.ToString();
@@ -510,7 +520,9 @@ class DuoRdpWrapper {
                         sw.WriteLine("=== Resolution change detected: " +
                                      currentW + "x" + currentH +
                                      " -> " + rW + "x" + rH +
-                                     ". Restarting DuoRdp_orig.exe.");
+                                     ". Updating conf and restarting DuoRdp_orig.exe.");
+
+                    SetDisplayResolution(duoDir, rW, rH);
 
                     try { proc.Kill(); } catch { }
                     proc.WaitForExit();
