@@ -58,7 +58,7 @@ Name: "engine_sunshine"; Description: "Native Sunshine - improved HID, DualSense
 
 [Files]
 ; Compiled binaries (always installed)
-Source: "..\release\DuoRdpWrapper.exe";  DestDir: "{tmp}"; Flags: deleteafterinstall
+Source: "..\bin\DuoRdpWrapper.exe";  DestDir: "{tmp}"; Flags: deleteafterinstall
 
 
 ; === Apollo engine ===
