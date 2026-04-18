@@ -482,8 +482,7 @@ begin
       '"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-    // Restarts the service after restore
-    Exec('sc.exe', 'start DuoService', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    // Service is NOT restarted automatically — user starts it manually.
 
     // Legacy cleanup: remove DuoGamepadIsolator if it exists
     Exec('sc.exe', 'stop {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
