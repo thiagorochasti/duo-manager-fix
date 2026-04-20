@@ -2,7 +2,7 @@
 
 The ultimate community patch for **[Duo Manager 1.5.6](https://github.com/DuoStream/Duo/releases/tag/v1.5.6)**. This fix resolves critical issues that appear on recent Windows 11 builds with NVIDIA RTX GPUs and [Moonlight](https://moonlight-stream.org/) streaming.
 
-> **Symptoms Fixed:** Moonlight fails to connect immediately, sessions stuck at 640×480, management UI showing a black/blank screen, 4K host overload during first connection, or audio routing to the wrong device.
+> **Symptoms Fixed:** Moonlight fails to connect immediately, sessions stuck at 640×480, management UI showing a black/blank screen, 4K host overload during first connection, audio routing to the wrong device, or gamepads bleeding into the host session.
 
 ---
 
@@ -37,7 +37,7 @@ The management page (`https://YOUR_PC:62203`) often appears blank because of out
 ### 4 — Dual Engine Support
 During installation, you can choose:
 - **Apollo 0.4.6:** Recommended for 99% of users. Solid stability and performance.
-- **Sunshine Native:** Best for users testing new HID features or specific controller drivers.
+- **Sunshine Native:** Best for users testing new HID features or specific controller drivers. The installer copies all required files (sunshine.exe, zlib1.dll, assets, scripts, tools) automatically — no manual file copying needed.
 
 ### 5 — Auto-Admin Installer
 No more "Run as Administrator" right-click requirement. The installer handles elevation automatically to ensure every patch is applied correctly.
@@ -62,6 +62,9 @@ When using Moonlight with a controller, the virtual gamepad created by ViGEmBus 
 
 After connecting from Moonlight, check `C:\Users\Public\duordp_args.txt`:
 
+**Streaming server**
+Moonlight connects successfully and displays the Desktop or Steam Big Picture.
+
 **Resolution correctly applied:**
 ```
 => Duo sent 640x480. Overriding with 2560x1440 [Moonlight (GET /launch mode=)]
@@ -81,11 +84,15 @@ After connecting from Moonlight, check `C:\Users\Public\duordp_args.txt`:
 **Resolution still wrong?**
 - Confirm `min_log_level = debug` is set in Apollo/Sunshine config.
 - Check `duordp_args.txt` — the log will show which source was used (or why detection failed).
+- On the very first connection after install, resolution may appear incorrect. Disconnect, restart Duo Manager, and reconnect — from the second connection onwards it works automatically.
 
 **No audio / audio on wrong device?**
 - Open `http://localhost:47990 → Configuration → Audio/Video`.
 - Set **Virtual Sink** to `Remote Audio` and restart the service.
 - See also: [#469](https://github.com/DuoStream/Duo/issues/469), [#478](https://github.com/DuoStream/Duo/issues/478).
+
+**Controller isolation (HidHide / ds4windows)?**
+Use the **Isolate HID Devices** option built into Duo Manager directly. The `DuoGamepadIsolator` service from older versions (v1.0.4/v1.0.5) has been removed — the installer will clean it up automatically if present.
 
 **Moonlight fails to connect / Black screen**
 - Check the Apollo/Sunshine log in `C:\Program Files\Duo\config\` for encoder errors (the log file name matches your `sunshine_name` setting, e.g. `Games.log`, `cosmo.log`).
