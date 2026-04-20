@@ -4,9 +4,14 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.RegularExpressions;
 
 class DuoRdpWrapper {
+
+    // =====================================================================
+    // P/Invoke — Job Objects
+    // =====================================================================
 
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern IntPtr CreateJobObject(IntPtr lpJobAttributes, string lpName);
@@ -53,9 +58,135 @@ class DuoRdpWrapper {
         public UIntPtr PeakJobMemoryUsed;
     }
 
+    // =====================================================================
+    // P/Invoke — Device Property Management (HID Jailing)
+    // =====================================================================
+
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr SetupDiGetClassDevsW(ref Guid classGuid, IntPtr enumerator, IntPtr hwndParent, uint flags);
+
+    [DllImport("setupapi.dll", EntryPoint = "SetupDiGetClassDevsW", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr SetupDiGetAllDevsW(IntPtr classGuid, IntPtr enumerator, IntPtr hwndParent, uint flags);
+
+    [DllImport("setupapi.dll", SetLastError = true)]
+    static extern bool SetupDiEnumDeviceInfo(IntPtr deviceInfoSet, uint memberIndex, ref SP_DEVINFO_DATA deviceInfoData);
+
+    [DllImport("setupapi.dll", SetLastError = true)]
+    static extern bool SetupDiDestroyDeviceInfoList(IntPtr deviceInfoSet);
+
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool SetupDiSetDevicePropertyW(
+        IntPtr deviceInfoSet,
+        ref SP_DEVINFO_DATA deviceInfoData,
+        ref DEVPROPKEY propertyKey,
+        uint propertyType,
+        byte[] propertyBuffer,
+        uint propertyBufferSize,
+        uint flags);
+
+    [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+    static extern int CM_Get_Device_ID(uint dnDevInst, StringBuilder buffer, uint bufferLen, uint ulFlags);
+
+    [DllImport("cfgmgr32.dll")]
+    static extern int CM_Get_Parent(out uint pdnDevInst, uint dnDevInst, uint ulFlags);
+
+    [DllImport("cfgmgr32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern int CM_Get_DevNode_Registry_Property(uint dnDevInst, uint ulProperty, out uint pulRegDataType, StringBuilder buffer, ref uint pulLength, uint ulFlags);
+
+    [DllImport("cfgmgr32.dll")]
+    static extern int CM_Reenumerate_DevNode(uint dnDevInst, uint ulFlags);
+
+    const uint CM_REENUMERATE_SYNCHRONOUS = 0x00000001;
+    const uint CM_DRP_SERVICE = 0x00000005;
+
+    // =====================================================================
+    // P/Invoke — WTS Session Enumeration
+    // =====================================================================
+
+    [DllImport("wtsapi32.dll", SetLastError = true)]
+    static extern bool WTSEnumerateSessionsW(IntPtr hServer, uint reserved, uint version,
+        out IntPtr ppSessionInfo, out uint pCount);
+
+    [DllImport("wtsapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool WTSQuerySessionInformationW(IntPtr hServer, uint sessionId,
+        int wtsInfoClass, out IntPtr ppBuffer, out uint pBytesReturned);
+
+    [DllImport("wtsapi32.dll")]
+    static extern void WTSFreeMemory(IntPtr pMemory);
+
+    const int WTSUserName = 5;
+    const int WTSConnectState = 8;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct WTS_SESSION_INFO {
+        public uint SessionId;
+        public string pWinStationName;
+        public int State;
+    }
+
+    // Returns the session ID of the active RDP session for the given username.
+    // Falls back to -1 if not found. Retries up to maxWait seconds.
+    static int GetRdpSessionId(string username, string logPath, int maxWaitSec = 60) {
+        DateTime deadline = DateTime.Now.AddSeconds(maxWaitSec);
+        while (DateTime.Now < deadline) {
+            IntPtr pInfo;
+            uint count;
+            if (WTSEnumerateSessionsW(IntPtr.Zero, 0, 1, out pInfo, out count)) {
+                int size = Marshal.SizeOf(typeof(WTS_SESSION_INFO));
+                for (uint i = 0; i < count; i++) {
+                    var info = (WTS_SESSION_INFO)Marshal.PtrToStructure(
+                        new IntPtr(pInfo.ToInt64() + i * size), typeof(WTS_SESSION_INFO));
+                    // State 0=Active, 4=Disconnected
+                    if (info.State != 0 && info.State != 4) continue;
+                    IntPtr pUser;
+                    uint bytes;
+                    if (WTSQuerySessionInformationW(IntPtr.Zero, info.SessionId,
+                            WTSUserName, out pUser, out bytes)) {
+                        string user = Marshal.PtrToStringUni(pUser);
+                        WTSFreeMemory(pUser);
+                        if (string.Equals(user, username, StringComparison.OrdinalIgnoreCase)) {
+                            WTSFreeMemory(pInfo);
+                            Log(logPath, "Jailer: sessao RDP encontrada para usuario '" + username + "' => SessionId=" + info.SessionId);
+                            return (int)info.SessionId;
+                        }
+                    }
+                }
+                WTSFreeMemory(pInfo);
+            }
+            System.Threading.Thread.Sleep(2000);
+        }
+        Log(logPath, "Jailer: sessao RDP para '" + username + "' nao encontrada apos " + maxWaitSec + "s.");
+        return -1;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct SP_DEVINFO_DATA {
+        public uint cbSize;
+        public Guid classGuid;
+        public uint devInst;
+        public IntPtr reserved;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct DEVPROPKEY {
+        public Guid fmtid;
+        public uint pid;
+    }
+
+    static readonly DEVPROPKEY DEVPKEY_Device_SessionId = new DEVPROPKEY {
+        fmtid = new Guid("83da6326-97a6-4088-9453-a1923f573b29"),
+        pid = 6
+    };
+
+    const uint DIGCF_PRESENT = 0x00000002;
+    const uint DEVPROP_TYPE_UINT32 = 0x00000007;
+    static readonly Guid HID_CLASS_GUID = new Guid("745a17a0-74d3-11d0-b6fe-00a0c90f57da");
+
+    // =====================================================================
+    // Configuration & Resolution Logic
+    // =====================================================================
+
     // Reads target_resolution from C:\Program Files\Duo\config\duo_wrapper.conf
-    // Format: target_resolution=1920x1080
-    // Allows the user to force a specific resolution regardless of the physical monitor.
     static bool TryReadWrapperConfig(string duoDir, out int width, out int height) {
         width  = 0;
         height = 0;
@@ -78,8 +209,6 @@ class DuoRdpWrapper {
         return false;
     }
 
-    // Reads SUNSHINE_CLIENT_WIDTH / SUNSHINE_CLIENT_HEIGHT injected by Sunshine into child processes.
-    // Present when Apollo/Sunshine calls DuoRdp.exe directly as the app do_cmd.
     static bool TryReadSunshineEnvResolution(out int width, out int height) {
         width  = 0;
         height = 0;
@@ -89,15 +218,6 @@ class DuoRdpWrapper {
         return int.TryParse(w, out width) && int.TryParse(h, out height) && width > 0 && height > 0;
     }
 
-    // Finds the active Sunshine/Apollo config file regardless of sunshine_name.
-    // Apollo names all config files after sunshine_name (e.g. cosmo.conf, Games.conf).
-    // We scan config/*.conf, skip duo_wrapper.conf, and return the first file that
-    // contains "log_path" or "min_log_level" — those keys only appear in the main conf.
-    // Finds the active Sunshine/Apollo config by picking the conf whose log file was
-    // most recently written — that is always the currently running Sunshine session.
-    // This handles machines with multiple conf files (e.g. Games.conf from an old install
-    // alongside Notebook.conf from a new one): the stale conf's log is older and loses.
-    // Falls back to any conf that declares log_path when no log file exists yet (first run).
     static string GetConfPath(string duoDir) {
         string configDir = Path.Combine(duoDir, "config");
         if (!Directory.Exists(configDir)) return null;
@@ -135,8 +255,6 @@ class DuoRdpWrapper {
         return null;
     }
 
-    // Reads log_path from the active Sunshine/Apollo conf to find the actual log file.
-    // Falls back to {conf_stem}.log (e.g. cosmo.log) when the setting is absent.
     static string GetLogPath(string duoDir) {
         string confPath = GetConfPath(duoDir);
         if (confPath != null && File.Exists(confPath)) {
@@ -151,26 +269,19 @@ class DuoRdpWrapper {
                         return Path.Combine(duoDir, "config", val);
                 }
             } catch { }
-            // Use the same stem as the conf file (e.g. cosmo.conf -> cosmo.log)
             string stem = Path.GetFileNameWithoutExtension(confPath);
             return Path.Combine(duoDir, "config", stem + ".log");
         }
         return Path.Combine(duoDir, "config", "Games.log");
     }
 
-    // Writes dd_manual_resolution = WxH and dd_resolution_option = manual to the active conf,
-    // so Sunshine sets the virtual display to exactly the Moonlight-requested resolution
-    // before the RDP session starts. If the keys already exist they are updated in-place;
-    // otherwise they are appended. Falls back to setting dd_resolution_option = disabled
-    // when width/height are 0 (resolution unknown).
-    // Returns true if the file content actually changed on disk.
     static bool SetDisplayResolution(string duoDir, int width, int height) {
         string confPath = GetConfPath(duoDir);
         if (confPath == null || !File.Exists(confPath)) return false;
         try {
             string[] lines = File.ReadAllLines(confPath);
             bool hadOption = false, hadManual = false;
-            var result = new System.Collections.Generic.List<string>(lines.Length + 2);
+            var result = new List<string>(lines.Length + 2);
             foreach (string line in lines) {
                 string t = line.Trim();
                 if (t.StartsWith("dd_resolution_option", StringComparison.OrdinalIgnoreCase)) {
@@ -180,7 +291,6 @@ class DuoRdpWrapper {
                 }
                 if (t.StartsWith("dd_manual_resolution", StringComparison.OrdinalIgnoreCase)) {
                     if (width > 0) { result.Add("dd_manual_resolution = " + width + "x" + height); hadManual = true; }
-                    // drop the line when width==0 (no resolution known)
                     continue;
                 }
                 result.Add(line);
@@ -190,8 +300,6 @@ class DuoRdpWrapper {
             if (!hadManual && width > 0)
                 result.Add("dd_manual_resolution = " + width + "x" + height);
 
-            // Only write and report change if content actually differs, to avoid
-            // unnecessary service restarts on repeat sessions with same resolution.
             string[] newLines = result.ToArray();
             if (newLines.Length != lines.Length) { File.WriteAllLines(confPath, newLines); return true; }
             for (int i = 0; i < newLines.Length; i++) {
@@ -201,8 +309,6 @@ class DuoRdpWrapper {
         } catch { return false; }
     }
 
-    // Reads sunshine_name from the active Sunshine/Apollo conf.
-    // Falls back to null when the setting is absent (caller should use Environment.MachineName).
     static string ReadSunshineName(string duoDir) {
         string confPath = GetConfPath(duoDir);
         if (confPath == null) return null;
@@ -219,11 +325,6 @@ class DuoRdpWrapper {
         return null;
     }
 
-    // Reads the exact resolution requested by Moonlight from the HTTP GET /launch request
-    // logged by Sunshine with min_log_level=debug. Reads only the last 512KB to avoid
-    // blocking on large log files. Searches from end to start (most recent session).
-    // Only accepts entries whose timestamp is within 60 seconds of now, to avoid using
-    // stale entries from a previous Moonlight session when a new connection is starting.
     static bool TryReadMoonlightLaunchResolution(string duoDir, out int width, out int height) {
         width  = 0;
         height = 0;
@@ -239,8 +340,6 @@ class DuoRdpWrapper {
                     content = sr.ReadToEnd();
             }
             string[] lines = content.Split('\n');
-            // Sunshine debug log format: "[2026-04-16 20:40:30.581]: Debug: mode -- 2560x1600x60"
-            // The mode parameter is logged individually after "DESTINATION :: /launch"
             Regex reLaunch = new Regex(
                 @"^\[(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\.\d+\].*Debug:\s+mode\s+--\s+(\d+)x(\d+)x\d+",
                 RegexOptions.IgnoreCase);
@@ -248,7 +347,6 @@ class DuoRdpWrapper {
             for (int i = lines.Length - 1; i >= 0; i--) {
                 Match m = reLaunch.Match(lines[i]);
                 if (!m.Success) continue;
-                // Reject entries older than 60 seconds — they belong to a previous session
                 DateTime ts;
                 if (DateTime.TryParse(m.Groups[1].Value, CultureInfo.InvariantCulture,
                         DateTimeStyles.None, out ts) &&
@@ -261,9 +359,6 @@ class DuoRdpWrapper {
         return false;
     }
 
-    // Reads the streaming resolution from Games.log (Sunshine/Apollo with min_log_level=info).
-    // Sunshine logs "Desktop resolution [WxH]" before invoking DuoRdp.exe.
-    // Searches from end to start to get the most recent session. Reads only the last 512KB.
     static bool TryReadMoonlightResolution(string duoDir, out int width, out int height) {
         width = 0;
         height = 0;
@@ -285,8 +380,6 @@ class DuoRdpWrapper {
                 if (m.Success) {
                     int w = int.Parse(m.Groups[1].Value);
                     int h = int.Parse(m.Groups[2].Value);
-                    // Ignore 640x480 and other sub-800x600 entries — Sunshine logs this
-                    // resolution during encoder testing at startup before any client connects.
                     if (w >= 800 && h >= 600) {
                         width  = w;
                         height = h;
@@ -298,10 +391,6 @@ class DuoRdpWrapper {
         return false;
     }
 
-    // Reads dd_manual_resolution from the active Apollo/Sunshine conf (secondary fallback).
-    // Uses GetConfPath() so it finds Games.conf (or whatever the active conf is named)
-    // instead of relying on the hardcoded "sunshine.conf" name which Duo does not use.
-    // Line format: "dd_manual_resolution = 1920x1080" (with or without spaces).
     static bool TryReadApolloResolution(string duoDir, out int width, out int height) {
         width = 0;
         height = 0;
@@ -325,47 +414,172 @@ class DuoRdpWrapper {
         return false;
     }
 
+    // =====================================================================
+    // HID Jailing Logic (Multiseat Isolation)
+    // =====================================================================
+
+    static void StartGamepadJailer(string wrapperLog, string rdpUsername) {
+        int mySessionId = Process.GetCurrentProcess().SessionId;
+        Log(wrapperLog, "Jailer: thread iniciada. ProcessSessionId=" + mySessionId + " usuario=" + rdpUsername);
+        var jailerThread = new System.Threading.Thread(() => {
+            int rdpSessionId = GetRdpSessionId(rdpUsername, wrapperLog, 60);
+            if (rdpSessionId < 0) return;
+            var seenDevices = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            int cycle = 0;
+            while (true) {
+                try {
+                    JailGamepads(rdpSessionId, seenDevices, wrapperLog, cycle++);
+                } catch (Exception ex) {
+                    Log(wrapperLog, "Jailer: excecao no ciclo " + cycle + ": " + ex.Message);
+                }
+                System.Threading.Thread.Sleep(2000);
+            }
+        });
+        jailerThread.IsBackground = true;
+        jailerThread.Name = "DuoGamepadJailer";
+        jailerThread.Start();
+    }
+
+    const uint DIGCF_ALLCLASSES = 0x00000004;
+
+    static void JailGamepads(int sessionId, HashSet<string> seen, string logPath, int cycle) {
+        IntPtr devs = SetupDiGetAllDevsW(IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, DIGCF_PRESENT | DIGCF_ALLCLASSES);
+        if (devs == new IntPtr(-1)) {
+            if (cycle == 0) Log(logPath, "Jailer: SetupDiGetAllDevsW falhou. Erro=" + Marshal.GetLastWin32Error());
+            return;
+        }
+
+        try {
+            uint idx = 0;
+            uint total = 0;
+            while (true) {
+                var devData = new SP_DEVINFO_DATA { cbSize = (uint)Marshal.SizeOf(typeof(SP_DEVINFO_DATA)) };
+                if (!SetupDiEnumDeviceInfo(devs, idx, ref devData)) break;
+                idx++;
+                total++;
+
+                var sb = new StringBuilder(512);
+                if (CM_Get_Device_ID(devData.devInst, sb, 512, 0) != 0) continue;
+                string instanceId = sb.ToString();
+
+                if (seen.Contains(instanceId)) continue;
+
+                bool isXinput = instanceId.IndexOf("IG_", StringComparison.OrdinalIgnoreCase) >= 0
+                    || instanceId.IndexOf("VID_045E", StringComparison.OrdinalIgnoreCase) >= 0;
+                if (isXinput) LogDeviceAncestors(devData.devInst, instanceId, logPath);
+
+                if (IsViGEmDevice(devData.devInst)) {
+                    Log(logPath, "Jailer: ViGEm device detected: " + instanceId);
+                    byte[] sidBuf = BitConverter.GetBytes((uint)sessionId);
+                    DEVPROPKEY key = DEVPKEY_Device_SessionId;
+                    if (SetupDiSetDevicePropertyW(devs, ref devData, ref key, DEVPROP_TYPE_UINT32, sidBuf, 4, 0)) {
+                        CM_Reenumerate_DevNode(devData.devInst, CM_REENUMERATE_SYNCHRONOUS);
+                        Log(logPath, "  => Jailed into session " + sessionId + " successfully.");
+                        seen.Add(instanceId);
+                    } else {
+                        int err = Marshal.GetLastWin32Error();
+                        Log(logPath, "  !! Jailing failed. Win32Error=" + err);
+                    }
+                }
+            }
+            // Log diagnóstico apenas no primeiro ciclo
+            if (cycle == 0) Log(logPath, "Jailer: ciclo 0 concluido. HID devices encontrados=" + total);
+        } finally {
+            SetupDiDestroyDeviceInfoList(devs);
+        }
+    }
+
+    static void LogDeviceAncestors(uint devInst, string instanceId, string logPath) {
+        var sb2 = new StringBuilder(512);
+        uint cur = devInst;
+        var chain = new System.Text.StringBuilder();
+        for (int lvl = 0; lvl < 4; lvl++) {
+            uint parent;
+            if (CM_Get_Parent(out parent, cur, 0) != 0) break;
+            uint pt; uint bs = 512;
+            var sb = new StringBuilder((int)bs);
+            string svc = CM_Get_DevNode_Registry_Property(parent, CM_DRP_SERVICE, out pt, sb, ref bs, 0) == 0
+                ? sb.ToString() : "(none)";
+            if (CM_Get_Device_ID(parent, sb2, 512, 0) == 0)
+                chain.Append(" L" + lvl + "=[" + svc + "]");
+            else
+                chain.Append(" L" + lvl + "=[" + svc + "]");
+            cur = parent;
+        }
+        if (instanceId.IndexOf("IG_", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            instanceId.IndexOf("VID_045E", StringComparison.OrdinalIgnoreCase) >= 0)
+            Log(logPath, "  DIAG: " + instanceId + chain);
+    }
+
+    static bool IsViGEmDevice(uint devInst) {
+        uint cur = devInst;
+        for (int level = 0; level < 4; level++) {
+            uint parent;
+            if (CM_Get_Parent(out parent, cur, 0) != 0) return false;
+
+            uint propType;
+            uint bufferSize = 512;
+            var sb = new StringBuilder((int)bufferSize);
+            if (CM_Get_DevNode_Registry_Property(parent, CM_DRP_SERVICE, out propType, sb, ref bufferSize, 0) == 0) {
+                string svc = sb.ToString();
+                if ("xusb22".Equals(svc, StringComparison.OrdinalIgnoreCase) ||
+                    "ds4drv".Equals(svc, StringComparison.OrdinalIgnoreCase) ||
+                    "ViGEmBus".Equals(svc, StringComparison.OrdinalIgnoreCase)) {
+                    return true;
+                }
+            }
+            cur = parent;
+        }
+        return false;
+    }
+
+    // =====================================================================
+    // Main Entry Point
+    // =====================================================================
+
     static string BuildQuotedArgs(string[] a) {
         return string.Join(" ", Array.ConvertAll(a,
             delegate(string s) { return "\"" + s + "\""; }));
     }
 
+    static void Log(string logFile, string msg) {
+        try {
+            File.AppendAllText(logFile, "[" + DateTime.Now.ToString("HH:mm:ss.fff") + "] " + msg + Environment.NewLine);
+        } catch { }
+    }
+
     static int Main(string[] args) {
-        string log    = @"C:\Users\Public\duordp_args.txt";
-        // Derive Duo install directory from the wrapper's own location.
-        // DuoRdp.exe (this wrapper) always lives inside the Duo install folder,
-        // so this works regardless of where Duo was installed.
-        string duoDir = Path.GetDirectoryName(
-            Process.GetCurrentProcess().MainModule.FileName);
+        string logPath = @"C:\Users\Public\duordp_args.txt";
+        string duoDir  = Path.GetDirectoryName(Process.GetCurrentProcess().MainModule.FileName);
 
-        using (var sw = new StreamWriter(log, true)) {
-            sw.WriteLine("=== DuoRdpWrapper invoked: " + DateTime.Now);
-            sw.WriteLine("Args count: " + args.Length);
+        // Single instance lock per user to prevent double login sessions
+        bool createdNew;
+        string mutexName = "Global\\DuoRdpWrapper_" + Environment.UserName;
+        using (var mutex = new System.Threading.Mutex(true, mutexName, out createdNew)) {
+            if (!createdNew) {
+                Log(logPath, "!!! DuoRdpWrapper already running for user " + Environment.UserName + ". Exiting to prevent double session.");
+                return 0;
+            }
+
+            Log(logPath, "=== DuoRdpWrapper invoked: " + DateTime.Now);
+            Log(logPath, "Args count: " + args.Length);
             for (int i = 0; i < args.Length; i++)
-                sw.WriteLine("  [" + i + "] = " + args[i]);
-        }
+                Log(logPath, "  [" + i + "] = " + args[i]);
 
-        // Leave Games.conf untouched at startup — args[5]/args[6] are the authoritative
-        // resolution source. Writing dd_resolution_option=disabled here before we know the
-        // real resolution caused Sunshine to lock the virtual display at 640x480.
+            // Start the HID Jailer thread to isolate controllers created by official Sunshine
+            // args[2] = username in DuoManagerService mode; fallback to Environment.UserName
+            string rdpUser = (args.Length >= 3 && !string.IsNullOrEmpty(args[2]))
+                ? args[2] : Environment.UserName;
+            StartGamepadJailer(logPath, rdpUser);
 
         string[] newArgs;
         int currentW = 0, currentH = 0;
 
         if (args.Length == 0) {
-            // ── Sunshine direct mode ──────────────────────────────────────────────────
-            // Called by Apollo/Sunshine as the app do_cmd (no args).
-            // SUNSHINE_CLIENT_* env vars are injected per session — use them as
-            // the primary resolution source.
+            // ── Sunshine direct mode ──────────────────────────────────────────
             int w = 0, h = 0;
             string resSource = null;
 
-            // Priority 1: env vars injected by Apollo per session (most reliable)
-            // Priority 2: debug log mode= entry (within 60 s)
-            // Priority 3: info log Desktop resolution
-            // Priority 4: duo_wrapper.conf manual override
-            // Priority 5: Apollo dd_manual_resolution
-            // Fallback : 1920x1080
             int rW, rH;
             if (TryReadSunshineEnvResolution(out rW, out rH)) {
                 w = rW; h = rH; resSource = "SUNSHINE_CLIENT_WIDTH/HEIGHT (Apollo env)";
@@ -386,156 +600,73 @@ class DuoRdpWrapper {
             string domainName  = Environment.UserDomainName;
             int    lcid        = CultureInfo.CurrentCulture.LCID;
 
-            newArgs = new string[] {
-                "127.0.0.1",
-                machineName,
-                userName,
-                domainName,
-                lcid.ToString(),
-                w.ToString(),
-                h.ToString()
-            };
+            newArgs = new string[] { "127.0.0.1", machineName, userName, domainName, lcid.ToString(), w.ToString(), h.ToString() };
             currentW = w; currentH = h;
-
-            using (var sw = new StreamWriter(log, true)) {
-                sw.WriteLine("  => Sunshine direct mode." +
-                             " machine=" + machineName +
-                             " user="    + userName + "@" + domainName +
-                             " lcid="    + lcid +
-                             " res="     + w + "x" + h +
-                             " ["        + resSource + "]");
-            }
+            Log(logPath, "  => Sunshine direct mode. machine=" + machineName + " user=" + userName + "@" + domainName + " res=" + w + "x" + h + " [" + resSource + "]");
         } else {
-            // ── DuoManagerService mode ────────────────────────────────────────────────
-            // Called by DuoManagerService with 7 connection args.
-            // Override args[5] (width) and args[6] (height) with the correct resolution.
+            // ── DuoManagerService mode ────────────────────────────────────────
             newArgs = (string[])args.Clone();
-
             if (args.Length >= 7) {
-                int origWidth  = 0;
-                int origHeight = 0;
+                int origWidth, origHeight;
                 int.TryParse(args[5], out origWidth);
                 int.TryParse(args[6], out origHeight);
 
-                int targetW      = origWidth;
-                int targetH      = origHeight;
+                int targetW = origWidth, targetH = origHeight;
                 string resSource = null;
 
-                // Priority 1: GET /launch mode= from debug log (exact Moonlight-requested resolution)
-                // Priority 2: SUNSHINE_CLIENT_WIDTH/HEIGHT env vars (present if Apollo is the direct caller)
-                // Priority 3: duo_wrapper.conf (manual override — fallback if log unavailable)
-                // Priority 4: Desktop resolution from Games.log (RDP virtual display resolution)
-                // Priority 5: dd_manual_resolution from sunshine.conf (Apollo static config)
-                // Fallback: use whatever Duo sent
-                int rW = 0, rH = 0;
-                // Poll up to 50 s for Sunshine to write the "mode -- WxHxR" line.
-                // Sunshine clears the log at session start; the line appears ~25-30 s later.
+                int rW, rH;
                 DateTime waitUntil = DateTime.Now.AddSeconds(50);
                 while (!TryReadMoonlightLaunchResolution(duoDir, out rW, out rH)) {
                     if (DateTime.Now >= waitUntil) break;
                     System.Threading.Thread.Sleep(300);
                 }
-                if (rW > 0 && rH > 0) {
-                    targetW   = rW;
-                    targetH   = rH;
-                    resSource = "Moonlight (GET /launch mode=)";
-                } else if (TryReadSunshineEnvResolution(out rW, out rH)) {
-                    targetW   = rW;
-                    targetH   = rH;
-                    resSource = "Sunshine env (SUNSHINE_CLIENT_WIDTH/HEIGHT)";
-                } else if (TryReadWrapperConfig(duoDir, out rW, out rH)) {
-                    targetW   = rW;
-                    targetH   = rH;
-                    resSource = "duo_wrapper.conf (custom)";
-                } else if (TryReadMoonlightResolution(duoDir, out rW, out rH)) {
-                    targetW   = rW;
-                    targetH   = rH;
-                    resSource = "Games.log (Desktop resolution)";
-                } else if (TryReadApolloResolution(duoDir, out rW, out rH)) {
-                    targetW   = rW;
-                    targetH   = rH;
-                    resSource = "Apollo config (dd_manual_resolution)";
-                }
+                if (rW > 0 && rH > 0) { targetW = rW; targetH = rH; resSource = "Moonlight (GET /launch mode=)"; }
+                else if (TryReadSunshineEnvResolution(out rW, out rH)) { targetW = rW; targetH = rH; resSource = "Sunshine env"; }
+                else if (TryReadWrapperConfig(duoDir, out rW, out rH)) { targetW = rW; targetH = rH; resSource = "duo_wrapper.conf"; }
+                else if (TryReadMoonlightResolution(duoDir, out rW, out rH)) { targetW = rW; targetH = rH; resSource = "Games.log"; }
+                else if (TryReadApolloResolution(duoDir, out rW, out rH)) { targetW = rW; targetH = rH; resSource = "Apollo config"; }
 
-                // Write the resolved resolution into Games.conf so Sunshine's virtual
-                // display driver uses the right resolution when the RDP session is created.
-                // This must happen BEFORE DuoRdp_orig.exe is called.
                 SetDisplayResolution(duoDir, targetW, targetH);
-
                 newArgs[5] = targetW.ToString();
                 newArgs[6] = targetH.ToString();
-                currentW = targetW;
-                currentH = targetH;
+                currentW = targetW; currentH = targetH;
 
-                using (var sw = new StreamWriter(log, true)) {
-                    if (resSource != null && (targetW != origWidth || targetH != origHeight)) {
-                        sw.WriteLine("  => Duo sent " + origWidth + "x" + origHeight +
-                                     ". Overriding with " + targetW + "x" + targetH +
-                                     " [" + resSource + "]");
-                    } else if (resSource != null) {
-                        sw.WriteLine("  => Resolution confirmed: " + targetW + "x" + targetH +
-                                     " [" + resSource + "] -- matches what Duo sent.");
-                    } else {
-                        sw.WriteLine("  => Log file not found (" + GetLogPath(duoDir) + "). Using Duo resolution: " +
-                                     origWidth + "x" + origHeight);
-                    }
-                }
+                Log(logPath, "  => Resolution resolved: " + targetW + "x" + targetH + " [" + (resSource ?? "Duo default") + "]");
             }
         }
 
         string realExe = Path.Combine(duoDir, "DuoRdp_orig.exe");
 
-        // Job Object ensures the child process dies when the wrapper exits.
+        // Job Object for cleanup
         IntPtr hJob = CreateJobObject(IntPtr.Zero, null);
         if (hJob != IntPtr.Zero) {
             var info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
             info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            int size   = Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
+            int size = Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
             IntPtr ptr = Marshal.AllocHGlobal(size);
             Marshal.StructureToPtr(info, ptr, false);
             SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, ptr, (uint)size);
             Marshal.FreeHGlobal(ptr);
         }
 
-        var psi = new ProcessStartInfo();
-        psi.FileName        = realExe;
+        var psi = new ProcessStartInfo(realExe);
         psi.UseShellExecute = false;
 
-        // ── Main loop ─────────────────────────────────────────────────────────────────
-        // Launch DuoRdp_orig.exe, then poll the log every 5 seconds while the child
-        // is alive. If Moonlight reconnects with a different resolution (new "mode --"
-        // entry within the last 60 s), kill the child and relaunch with the new args.
-        // This gives real-time resolution updates without restarting DuoManagerService.
         while (true) {
             psi.Arguments = BuildQuotedArgs(newArgs);
-
-            using (var sw = new StreamWriter(log, true))
-                sw.WriteLine("  => Calling: " + realExe + " " + psi.Arguments);
+            Log(logPath, "  => Calling: " + realExe + " " + psi.Arguments);
 
             var proc = Process.Start(psi);
-
-            if (hJob != IntPtr.Zero)
-                AssignProcessToJobObject(hJob, proc.Handle);
+            if (hJob != IntPtr.Zero) AssignProcessToJobObject(hJob, proc.Handle);
 
             bool resolutionChanged = false;
-
-            // WaitForExit(5000) returns true if process exited, false on timeout (still alive).
             while (!proc.WaitForExit(5000)) {
                 int rW, rH;
-                if (TryReadMoonlightLaunchResolution(duoDir, out rW, out rH) &&
-                    (rW != currentW || rH != currentH)) {
-
-                    using (var sw = new StreamWriter(log, true))
-                        sw.WriteLine("=== Resolution change detected: " +
-                                     currentW + "x" + currentH +
-                                     " -> " + rW + "x" + rH +
-                                     ". Updating conf and restarting DuoRdp_orig.exe.");
-
+                if (TryReadMoonlightLaunchResolution(duoDir, out rW, out rH) && (rW != currentW || rH != currentH)) {
+                    Log(logPath, "=== Resolution change detected: " + currentW + "x" + currentH + " -> " + rW + "x" + rH);
                     SetDisplayResolution(duoDir, rW, rH);
-
                     try { proc.Kill(); } catch { }
                     proc.WaitForExit();
-
                     currentW = rW; currentH = rH;
                     newArgs[newArgs.Length - 2] = rW.ToString();
                     newArgs[newArgs.Length - 1] = rH.ToString();
@@ -543,11 +674,8 @@ class DuoRdpWrapper {
                     break;
                 }
             }
-
-            if (!resolutionChanged) {
-                return proc.ExitCode;
-            }
-            // else loop back and restart with the new resolution
+            if (!resolutionChanged) return proc.ExitCode;
         }
     }
+}
 }

@@ -6,7 +6,7 @@ The ultimate community patch for **[Duo Manager 1.5.6](https://github.com/DuoStr
 
 ---
 
-## Quick Install (v1.0.7)
+## Quick Install (v1.0.10)
 
 1. Ensure **[Duo Manager 1.5.6](https://github.com/DuoStream/Duo/releases/tag/v1.5.6)** is installed.
 2. Ensure **[ViGEmBus](https://github.com/nefarius/ViGEmBus/releases/latest)** is installed.
@@ -42,7 +42,14 @@ During installation, you can choose:
 ### 5 — Auto-Admin Installer
 No more "Run as Administrator" right-click requirement. The installer handles elevation automatically to ensure every patch is applied correctly.
 
-### 6 — Audio routed to wrong device / no audio (Duo 1.5.6 only)
+### 6 — Gamepad bleeding into host session (v1.0.10+)
+When using Moonlight with a controller, the virtual gamepad created by ViGEmBus was visible to the host Windows session — causing Steam, games and other apps on the host to detect and react to inputs meant only for the remote session.
+
+**Fix:** `DuoRdpWrapper` runs a background **HID Jailing** thread that automatically detects virtual Xbox 360 (xusb22/ViGEmBus) and DS4 (ds4drv/ViGEmBus) controllers and stamps them with `DEVPKEY_Device_SessionId`, restricting their visibility to the RDP session only. A forced device re-enumeration (`CM_Reenumerate_DevNode`) is issued immediately after so the change takes effect without restarting.
+
+> **Important:** Do **not** enable the HID Isolation option inside Duo Manager — this fix handles isolation automatically and the two mechanisms can conflict.
+
+### 7 — Audio routed to wrong device / no audio (Duo 1.5.6 only)
 `Duo.exe` hardcodes `virtual_sink = Remote Audio` internally and injects it into the Apollo/Sunshine config on every launch, silently overriding whatever audio sink you configured.
 
 **Fix:** The installer patches `Duo.exe` (Duo 1.5.6 only) to remove this hardcoded override, letting Apollo/Sunshine use the audio sink you actually configured.
