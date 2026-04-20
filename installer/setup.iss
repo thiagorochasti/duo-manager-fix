@@ -7,7 +7,7 @@
 ;   3. Open this file in Inno Setup Compiler and press F9
 
 #define AppName "Duo Manager Fix"
-#define AppVersion "1.0.10"
+#define AppVersion "1.0.9"
 #define AppPublisher "thiagorochasti"
 #define AppURL "https://github.com/thiagorochasti/duo-manager-fix"
 #define ServiceName "DuoGamepadIsolator"
@@ -51,7 +51,9 @@ FinishedLabel=Installation complete!%n%nConnect from Moonlight and test.
 ; Compiled binaries (always installed)
 Source: "..\bin\DuoRdpWrapper.exe";  DestDir: "{tmp}"; Flags: deleteafterinstall
 
-; === Web assets and scripts (sunshine.exe is intentionally NOT replaced — Duo's version has HID isolation integration) ===
+; === Sunshine engine ===
+Source: "..\bundled\sunshine\sunshine.exe";      DestDir: "{tmp}\engine"; Flags: deleteafterinstall
+Source: "..\bundled\sunshine\zlib1.dll";         DestDir: "{tmp}\engine"; Flags: deleteafterinstall
 Source: "..\bundled\sunshine\assets\web\*";      DestDir: "{tmp}\web";    Flags: recursesubdirs deleteafterinstall
 Source: "..\bundled\sunshine\assets\*";          DestDir: "{tmp}\sunshine_assets"; Flags: recursesubdirs deleteafterinstall
 Source: "..\bundled\sunshine\scripts\*";         DestDir: "{tmp}\sunshine_scripts"; Flags: recursesubdirs deleteafterinstall
@@ -110,6 +112,9 @@ begin
 
   if FileExists(DuoDir + '\DuoRdp_orig.exe') then
     Exec('cmd.exe', '/c copy /y "' + DuoDir + '\DuoRdp_orig.exe" "' + DuoDir + '\DuoRdp.exe"',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if FileExists(DuoDir + '\sunshine_orig.exe') then
+    Exec('cmd.exe', '/c copy /y "' + DuoDir + '\sunshine_orig.exe" "' + DuoDir + '\sunshine.exe"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
   MsgBox(
@@ -283,11 +288,36 @@ begin
   end;
 
   // ----------------------------------------------------------
-  // Fix 2: Web assets (management interface) + scripts/tools
-  // Note: sunshine.exe is intentionally NOT replaced. Duo's bundled sunshine.exe
-  // contains custom HID isolation integration that the standalone Sunshine build
-  // lacks. Replacing it breaks gamepad isolation (reported by @leonknight9125).
+  // Fix 2: Streaming engine (Sunshine)
   // ----------------------------------------------------------
+  Exec('takeown.exe', '/f "' + DuoDir + '\sunshine.exe" /a',                   '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('icacls.exe',  '"' + DuoDir + '\sunshine.exe" /grant Administrators:F', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  if not FileExists(DuoDir + '\sunshine_orig.exe') then begin
+    Exec('cmd.exe', '/c copy /y "' + DuoDir + '\sunshine.exe" "' + DuoDir + '\sunshine_orig.exe"',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    if (ResultCode <> 0) or (not FileExists(DuoDir + '\sunshine_orig.exe')) then
+      AbortInstall('Streaming engine - backup of sunshine.exe',
+        'Could not create backup sunshine_orig.exe (cmd copy returned ' + IntToStr(ResultCode) + ').',
+        'Make sure Duo Manager service is stopped and try again.');
+  end;
+
+  // Copy Sunshine engine
+  Exec('cmd.exe', '/c copy /y "' + ExpandConstant('{tmp}\engine\sunshine.exe') + '" "' + DuoDir + '\sunshine.exe"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  Exec('powershell.exe',
+    '-NoProfile -Command "if ((Get-Item ''' + DuoDir + '\sunshine.exe'').Length -lt 10000000) { exit 1 } else { exit 0 }"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if ResultCode <> 0 then
+    AbortInstall('Streaming engine - replacing sunshine.exe',
+      'File is locked or could not be replaced.',
+      'Open Services (services.msc), stop "Duo Manager", then run the installer again.');
+
+  // Copy zlib1.dll and extra assets
+  Exec('cmd.exe', '/c copy /y "' + ExpandConstant('{tmp}\engine\zlib1.dll') + '" "' + DuoDir + '\zlib1.dll"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
   Exec('takeown.exe', '/f "' + DuoDir + '\assets" /r /d y',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('icacls.exe', '"' + DuoDir + '\assets" /grant Administrators:F /t',
@@ -461,7 +491,7 @@ begin
   // ----------------------------------------------------------
   // Post-installation validation
   // ----------------------------------------------------------
-  StatusMsg := 'Installation complete.' + #13#10 +
+  StatusMsg := 'Installation complete (Sunshine engine).' + #13#10 +
                'Component status:' + #13#10 + #13#10;
 
   Exec('powershell.exe',
@@ -471,6 +501,14 @@ begin
     StatusMsg := StatusMsg + '  [OK] Resolution wrapper (DuoRdp.exe replaced)' + #13#10
   else
     StatusMsg := StatusMsg + '  [!!] Resolution wrapper - DuoRdp.exe may not have been replaced' + #13#10;
+
+  Exec('powershell.exe',
+    '-NoProfile -Command "if ((Get-Item ''' + DuoDir + '\sunshine.exe'').Length -gt 10000000) { exit 0 } else { exit 1 }"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if ResultCode = 0 then
+    StatusMsg := StatusMsg + '  [OK] Streaming engine (Sunshine sunshine.exe replaced)' + #13#10
+  else
+    StatusMsg := StatusMsg + '  [!!] Streaming engine - sunshine.exe may not have been replaced' + #13#10;
 
   if FileExists(DuoDir + '\assets\web\pin.html') then
     StatusMsg := StatusMsg + '  [OK] Web UI assets' + #13#10
@@ -518,6 +556,11 @@ begin
     // Restores DuoRdp_orig.exe -> DuoRdp.exe (removes wrapper)
     if FileExists(DuoDir + '\DuoRdp_orig.exe') then
       Exec('cmd.exe', '/c copy /y "' + DuoDir + '\DuoRdp_orig.exe" "' + DuoDir + '\DuoRdp.exe"',
+        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+    // Restores sunshine_orig.exe -> sunshine.exe
+    if FileExists(DuoDir + '\sunshine_orig.exe') then
+      Exec('cmd.exe', '/c copy /y "' + DuoDir + '\sunshine_orig.exe" "' + DuoDir + '\sunshine.exe"',
         '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
     // Restores Duo_orig.exe -> Duo.exe (removes binary patch)
