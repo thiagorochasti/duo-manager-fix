@@ -7,7 +7,7 @@
 ;   3. Open this file in Inno Setup Compiler and press F9
 
 #define AppName "Duo Manager Fix"
-#define AppVersion "1.0.8"
+#define AppVersion "1.0.9"
 #define AppPublisher "thiagorochasti"
 #define AppURL "https://github.com/thiagorochasti/duo-manager-fix"
 #define ServiceName "DuoGamepadIsolator"
@@ -44,7 +44,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Messages]
 WelcomeLabel1=Welcome to the %1 Setup Wizard
-WelcomeLabel2=This installer fixes known issues in Duo Manager 1.5.6:%n%n  1. Resolution locked at 640x480%n  2. Broken web management interface%n%nUses native Sunshine engine (better HID, DualSense and multi-session support).%n%nPrerequisite: Duo Manager 1.5.6 must be installed.%n%nClick Next to continue.
+WelcomeLabel2=This installer fixes known issues in Duo Manager 1.5.6:%n%n  1. Resolution locked at 640x480%n  2. Broken web management interface%n  3. Audio (Virtual Sink reverting to Remote Audio)%n  4. Chromium browsers crashing (Chrome, Edge)%n  5. PATH variable corruption (null bytes)%n  6. GPU preference for dual-GPU laptops%n%nUses native Sunshine engine (better HID, DualSense and multi-session support).%n%nPrerequisite: Duo Manager 1.5.6 must be installed.%n%nClick Next to continue.
 FinishedLabel=Installation complete!%n%nConnect from Moonlight and test.
 
 [Files]
@@ -60,6 +60,45 @@ Source: "..\bundled\sunshine\scripts\*";         DestDir: "{tmp}\sunshine_script
 Source: "..\bundled\sunshine\tools\*";           DestDir: "{tmp}\sunshine_tools";   Flags: recursesubdirs deleteafterinstall
 
 [Code]
+
+var
+  ChromiumFixPage:     TWizardPage;
+  ChromiumFixCheckbox: TCheckBox;
+
+// ============================================================
+// InitializeWizard: add optional Chromium fix page
+// ============================================================
+procedure InitializeWizard;
+var
+  Lbl: TLabel;
+begin
+  ChromiumFixPage := CreateCustomPage(wpSelectDir,
+    'Browser Compatibility Fix',
+    'Chromium-based browsers (Chrome, Edge) may crash after Duo is installed.');
+
+  Lbl := TLabel.Create(ChromiumFixPage);
+  Lbl.Parent   := ChromiumFixPage.Surface;
+  Lbl.Left     := 0;
+  Lbl.Top      := 0;
+  Lbl.Width    := ChromiumFixPage.SurfaceWidth;
+  Lbl.Height   := 110;
+  Lbl.WordWrap := True;
+  Lbl.AutoSize := False;
+  Lbl.Caption  :=
+    'Duo Manager injects DuoVerifier64.dll into all system processes.' + #13#10 +
+    'Modern Chromium builds block unsigned DLLs, causing STATUS_INVALID_IMAGE_HASH crashes.' + #13#10 + #13#10 +
+    'This fix disables Renderer Code Integrity for Chrome and Edge.' + #13#10 +
+    'It weakens browser renderer isolation slightly, but is required for Duo to function correctly.';
+
+  ChromiumFixCheckbox := TCheckBox.Create(ChromiumFixPage);
+  ChromiumFixCheckbox.Parent  := ChromiumFixPage.Surface;
+  ChromiumFixCheckbox.Left    := 0;
+  ChromiumFixCheckbox.Top     := 118;
+  ChromiumFixCheckbox.Width   := ChromiumFixPage.SurfaceWidth;
+  ChromiumFixCheckbox.Height  := 20;
+  ChromiumFixCheckbox.Caption := 'Fix Chrome/Edge crashes caused by Duo (recommended)';
+  ChromiumFixCheckbox.Checked := True;
+end;
 
 // ============================================================
 // AbortInstall: aborts with a clear message and restores backups
@@ -144,6 +183,18 @@ begin
   DuoDir := ExpandConstant('{#DuoDir}');
   StatusMsg := '';
   CopyResult := 0;
+
+  // ----------------------------------------------------------
+  // Fix 0: PATH sanitizer — remove null bytes inserted by Duo installer
+  // Bug #458: Duo injects \0 into System/User PATH, crashing tools and browsers.
+  // ----------------------------------------------------------
+  Exec('powershell.exe',
+    '-NoProfile -Command "' +
+    'foreach ($scope in @(''Machine'',''User'')) {' +
+    '  $p = [Environment]::GetEnvironmentVariable(''PATH'', $scope);' +
+    '  if ($p -and $p.Contains([char]0)) {' +
+    '    [Environment]::SetEnvironmentVariable(''PATH'', ($p -replace [char]0, ''''), $scope) } }"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
   // ============================================================
   // Stop the service and kill any running DuoRdp.exe (with retry loop)
@@ -395,6 +446,49 @@ begin
   // The DuoRdpWrapper resolution fix still works without this patch.
 
   // ----------------------------------------------------------
+  // Fix 7: GPU preference — force high-performance GPU for sunshine.exe and Duo.exe
+  // On dual-GPU laptops (iGPU + dGPU) the RDP session may default to iGPU,
+  // causing the virtual display driver (IddCx) to lock at 640x480.
+  // ----------------------------------------------------------
+  Exec('reg.exe',
+    'add "HKCU\Software\Microsoft\DirectX\UserGpuPreferences" ' +
+    '/v "' + DuoDir + '\sunshine.exe" /t REG_SZ /d "GpuPreference=2;" /f',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('reg.exe',
+    'add "HKCU\Software\Microsoft\DirectX\UserGpuPreferences" ' +
+    '/v "' + DuoDir + '\Duo.exe" /t REG_SZ /d "GpuPreference=2;" /f',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  // ----------------------------------------------------------
+  // Fix 8: RDP hardware acceleration
+  // Enables RemoteFX and hardware graphics capture for better GPU utilization
+  // in the RDP virtual session (improves resolution and frame capture on laptops).
+  // ----------------------------------------------------------
+  Exec('reg.exe',
+    'add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" ' +
+    '/v "fEnableRemoteFXAdv" /t REG_DWORD /d 1 /f',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('reg.exe',
+    'add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" ' +
+    '/v "fEnableHardwareGraphicsCapture" /t REG_DWORD /d 1 /f',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  // ----------------------------------------------------------
+  // Fix 9: Chromium renderer policy (opt-in — user chose on wizard page)
+  // DuoVerifier64.dll injection triggers STATUS_INVALID_IMAGE_HASH in Chrome/Edge.
+  // ----------------------------------------------------------
+  if ChromiumFixCheckbox.Checked then begin
+    Exec('reg.exe',
+      'add "HKLM\SOFTWARE\Policies\Google\Chrome" ' +
+      '/v "RendererCodeIntegrityEnabled" /t REG_DWORD /d 0 /f',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec('reg.exe',
+      'add "HKLM\SOFTWARE\Policies\Microsoft\Edge" ' +
+      '/v "RendererCodeIntegrityEnabled" /t REG_DWORD /d 0 /f',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  end;
+
+  // ----------------------------------------------------------
   // Post-installation validation
   // ----------------------------------------------------------
   StatusMsg := 'Installation complete (Sunshine engine).' + #13#10 +
@@ -425,6 +519,15 @@ begin
     StatusMsg := StatusMsg + '  [OK] Duo.exe binary patch (virtual_sink default cleared)' + #13#10
   else
     StatusMsg := StatusMsg + '  [!!] Duo.exe binary patch - Duo_orig.exe backup not found' + #13#10;
+
+  if ChromiumFixCheckbox.Checked then
+    StatusMsg := StatusMsg + '  [OK] Chromium renderer fix (Chrome/Edge crash fix applied)' + #13#10
+  else
+    StatusMsg := StatusMsg + '  [--] Chromium renderer fix (skipped by user)' + #13#10;
+
+  StatusMsg := StatusMsg + '  [OK] PATH sanitizer (null bytes removed)' + #13#10;
+  StatusMsg := StatusMsg + '  [OK] GPU preference set (high-performance GPU for sunshine/Duo)' + #13#10;
+  StatusMsg := StatusMsg + '  [OK] RDP hardware acceleration enabled' + #13#10;
 
   StatusMsg := StatusMsg + #13#10 + 'Connect from Moonlight and test.';
 
@@ -483,6 +586,20 @@ begin
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
     // Service is NOT restarted automatically — user starts it manually.
+
+    // Remove Chromium renderer policy applied during install
+    Exec('reg.exe', 'delete "HKLM\SOFTWARE\Policies\Google\Chrome" /v "RendererCodeIntegrityEnabled" /f',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec('reg.exe', 'delete "HKLM\SOFTWARE\Policies\Microsoft\Edge" /v "RendererCodeIntegrityEnabled" /f',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+    // Remove GPU preference registry entries
+    Exec('reg.exe',
+      'delete "HKCU\Software\Microsoft\DirectX\UserGpuPreferences" /v "' + DuoDir + '\sunshine.exe" /f',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    Exec('reg.exe',
+      'delete "HKCU\Software\Microsoft\DirectX\UserGpuPreferences" /v "' + DuoDir + '\Duo.exe" /f',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
     // Legacy cleanup: remove DuoGamepadIsolator if it exists
     Exec('sc.exe', 'stop {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
