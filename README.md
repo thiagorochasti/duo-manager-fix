@@ -2,7 +2,7 @@
 
 The ultimate community patch for **[Duo Manager 1.5.6](https://github.com/DuoStream/Duo/releases/tag/v1.5.6)**. This fix resolves critical issues that appear on recent Windows 11 builds with NVIDIA RTX GPUs and [Moonlight](https://moonlight-stream.org/) streaming.
 
-> **Symptoms Fixed:** Moonlight fails to connect immediately, sessions stuck at 640×480, management UI showing a black/blank screen, 4K host overload during first connection, or audio routing to the wrong device.
+> **Symptoms Fixed:** Moonlight fails to connect immediately, sessions stuck at 640×480, management UI showing a black/blank screen, 4K host overload during first connection, audio routing to the wrong device, or gamepads bleeding into the host session.
 
 ---
 
