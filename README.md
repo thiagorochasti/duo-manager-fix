@@ -6,7 +6,7 @@ The ultimate community patch for **[Duo Manager 1.5.6](https://github.com/DuoStr
 
 ---
 
-## Quick Install (v1.0.10)
+## Quick Install (v1.0.11)
 
 1. Ensure **[Duo Manager 1.5.6](https://github.com/DuoStream/Duo/releases/tag/v1.5.6)** is installed.
 2. Ensure **[ViGEmBus](https://github.com/nefarius/ViGEmBus/releases/latest)** is installed.
@@ -42,10 +42,18 @@ During installation, you can choose:
 ### 5 — Auto-Admin Installer
 No more "Run as Administrator" right-click requirement. The installer handles elevation automatically to ensure every patch is applied correctly.
 
-### 6 — Gamepad bleeding into host session (v1.0.10+)
+### 6 — Gamepad bleeding into host session (v1.0.11+)
 When using Moonlight with a controller, the virtual gamepad created by ViGEmBus was visible to the host Windows session — causing Steam, games and other apps on the host to detect and react to inputs meant only for the remote session.
 
-**Fix:** `DuoRdpWrapper` runs a background **HID Jailing** thread that automatically detects virtual Xbox 360 (xusb22/ViGEmBus) and DS4 (ds4drv/ViGEmBus) controllers and stamps them with `DEVPKEY_Device_SessionId`, restricting their visibility to the RDP session only. A forced device re-enumeration (`CM_Reenumerate_DevNode`) is issued immediately after so the change takes effect without restarting.
+**Fix (v1.0.11 — Proactive Isolation):** The `DuoGamepadIsolator` service now uses a **three-layer defense** that eliminates the race condition entirely:
+
+1. **Pre-Creation Blacklist** — Before any connection occurs, 64+ predictable XUSB Instance IDs (Xbox 360/One/Series, DS4, DualSense) are injected into the HidHide blacklist. When ViGEmBus creates a virtual controller, it is **already hidden** (0ms window).
+2. **Kernel-Level Disable** — A dedicated kernel callback (`CM_Register_Notification` for `GUID_DEVINTERFACE_XUSB`) immediately disables the XUSB device via `CM_Disable_DevNode`, making it invisible to XInput polling before Steam can detect it. Fully reversible on service stop.
+3. **Persistent XUSB Blacklist** — Discovered XUSB IDs are saved to `C:\ProgramData\DuoFix\xusb_blacklist.dat` and automatically re-blocked on service restart, surviving Windows reboots.
+
+Additional protections include a **50ms watchdog** that detects and re-hides any leaked devices, **delayed unhide (30s)** to absorb rapid reconnections, and **adaptive recycling** (10ms fast path / 50ms full path) with `WM_DEVICECHANGE` broadcast to force Steam re-enumeration.
+
+> **Important:** Do **not** enable the HID Isolation option inside Duo Manager — this fix handles isolation automatically and the two mechanisms can conflict.
 
 > **Important:** Do **not** enable the HID Isolation option inside Duo Manager — this fix handles isolation automatically and the two mechanisms can conflict.
 

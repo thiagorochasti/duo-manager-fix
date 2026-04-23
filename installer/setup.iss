@@ -7,7 +7,7 @@
 ;   3. Open this file in Inno Setup Compiler and press F9
 
 #define AppName "Duo Manager Fix"
-#define AppVersion "1.0.10"
+#define AppVersion "1.0.11"
 #define AppPublisher "thiagorochasti"
 #define AppURL "https://github.com/thiagorochasti/duo-manager-fix"
 #define ServiceName "DuoGamepadIsolator"
