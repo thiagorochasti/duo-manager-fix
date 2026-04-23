@@ -21,6 +21,20 @@ echo === Duo Manager Fix — Preparar Bundle (Dual Engine) ===
 echo.
 
 :: ============================================================
+:: HidHide driver
+:: ============================================================
+echo [HidHide] Verificando...
+if not exist "%~dp0..\bundled\hidhide\HidHide_1.5.230_x64.exe" (
+    echo   AVISO: HidHide installer nao encontrado em bundled\hidhide\
+    echo   Baixe de: https://github.com/nefarius/HidHide/releases/download/v1.5.230.0/HidHide_1.5.230_x64.exe
+    echo   O instalador tentara instalar o HidHide se ja estiver presente no sistema.
+    echo.
+) else (
+    echo   [OK] HidHide encontrado no bundle.
+    echo.
+)
+
+:: ============================================================
 :: Apollo 0.4.6
 :: ============================================================
 echo [Apollo] Verificando...

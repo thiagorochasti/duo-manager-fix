@@ -44,12 +44,16 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Messages]
 WelcomeLabel1=Welcome to the %1 Setup Wizard
-WelcomeLabel2=This installer fixes known issues in Duo Manager 1.5.6:%n%n  1. Resolution locked at 640x480%n  2. Broken web management interface%n  3. Audio (Virtual Sink reverting to Remote Audio)%n  4. Chromium browsers crashing (Chrome, Edge)%n  5. PATH variable corruption (null bytes)%n  6. GPU preference for dual-GPU laptops%n%nUses native Sunshine engine (better HID, DualSense and multi-session support).%n%nPrerequisite: Duo Manager 1.5.6 must be installed.%n%nClick Next to continue.
+WelcomeLabel2=This installer fixes known issues in Duo Manager 1.5.6:%n%n  1. Resolution locked at 640x480%n  2. Broken web management interface%n  3. Audio (Virtual Sink reverting to Remote Audio)%n  4. Chromium browsers crashing (Chrome, Edge)%n  5. PATH variable corruption (null bytes)%n  6. GPU preference for dual-GPU laptops%n  7. HidHide driver for gamepad isolation (auto-installed if missing)%n%nUses native Sunshine engine (better HID, DualSense and multi-session support).%n%nPrerequisite: Duo Manager 1.5.6 must be installed.%n%nClick Next to continue.
 FinishedLabel=Installation complete!%n%nConnect from Moonlight and test.
 
 [Files]
 ; Compiled binaries (always installed)
-Source: "..\bin\DuoRdpWrapper.exe";  DestDir: "{tmp}"; Flags: deleteafterinstall
+Source: "..\bin\DuoRdpWrapper.exe";      DestDir: "{tmp}"; Flags: deleteafterinstall
+Source: "..\bin\DuoGamepadIsolator.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall
+
+; === HidHide driver ===
+Source: "..\bundled\hidhide\HidHide_1.5.230_x64.exe"; DestDir: "{tmp}\hidhide"; Flags: deleteafterinstall
 
 ; === Sunshine engine ===
 Source: "..\bundled\sunshine\sunshine.exe";      DestDir: "{tmp}\engine"; Flags: deleteafterinstall
@@ -173,9 +177,9 @@ var
 begin
   if CurStep = ssInstall then
   begin
-    // Legacy cleanup (Pre-Install): ensures any old isolator service is removed from the system
-    Exec('sc.exe', 'stop {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Exec('sc.exe', 'delete {#ServiceName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    // Nothing here anymore — all DuoGamepadIsolator cleanup/replacement is done
+    // in a single generated PowerShell script during ssPostInstall (Fix 0.6).
+    // This avoids quoting/escaping hell with multiple Exec() calls.
   end;
 
   if CurStep <> ssPostInstall then Exit;
@@ -195,6 +199,124 @@ begin
     '  if ($p -and $p.Contains([char]0)) {' +
     '    [Environment]::SetEnvironmentVariable(''PATH'', ($p -replace [char]0, ''''), $scope) } }"',
     '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  // ----------------------------------------------------------
+  // Fix 0.5: HidHide driver — install if not present
+  // Required for gamepad isolation (cloaking HID devices per session).
+  // ----------------------------------------------------------
+  Log('Checking HidHide installation...');
+  if not FileExists(ExpandConstant('{pf}\Nefarius Software Solutions\HidHide\x64\HidHideCLI.exe')) then
+  begin
+    Log('HidHide not found. Installing from bundle...');
+    if not FileExists(ExpandConstant('{tmp}\hidhide\HidHide_1.5.230_x64.exe')) then
+    begin
+      Log('Warning: HidHide bundle not found in temp. Skipping automatic install.');
+    end
+    else
+    begin
+      Exec(ExpandConstant('{tmp}\hidhide\HidHide_1.5.230_x64.exe'),
+        '/quiet /norestart',
+        '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      if ResultCode <> 0 then
+        Log('Warning: HidHide installer returned ' + IntToStr(ResultCode) + '. Will attempt to continue.');
+    end;
+    if ResultCode <> 0 then
+      Log('Warning: HidHide installer returned ' + IntToStr(ResultCode) + '. Will attempt to continue.');
+  end
+  else
+    Log('HidHide already installed. Skipping.');
+
+  // ----------------------------------------------------------
+  // Fix 0.6: DuoGamepadIsolator service — atomic replacement via generated PS1
+  //
+  // Instead of fragile inline PowerShell in Exec() calls, we generate a complete
+  // .ps1 script to {tmp}, then execute it once. This avoids all quoting/escaping
+  // issues and lets us log every step to a file for diagnostics.
+  // ----------------------------------------------------------
+  Log('Installing DuoGamepadIsolator service (atomic PS1)...');
+
+  // Build the target path using {pf64} on 64-bit Windows to ensure we hit
+  // C:\Program Files\DuoFix and not C:\Program Files (x86)\DuoFix.
+  SaveStringToFile('C:\Users\Public\_install_isolator.ps1',
+    '$logFile = "C:\Users\Public\duo_installer_isolator.log"' + #13#10 +
+    '"[{0:yyyy-MM-dd HH:mm:ss}] SCRIPT START" -f (Get-Date) | Set-Content -Path $logFile' + #13#10 +
+    '$ErrorActionPreference = "Stop"' + #13#10 +
+    '$svcName = "{#ServiceName}"' + #13#10 +
+    '$srcBinary = "' + ExpandConstant('{tmp}\DuoGamepadIsolator.exe') + '"' + #13#10 +
+    '$dstDir = "' + ExpandConstant('{pf64}\DuoFix') + '"' + #13#10 +
+    '$dstBinary = Join-Path $dstDir "DuoGamepadIsolator.exe"' + #13#10 +
+    'function Write-Log($msg) { $line = "[{0:yyyy-MM-dd HH:mm:ss}] {1}" -f (Get-Date), $msg; Add-Content -Path $logFile -Value $line }' + #13#10 +
+    'try {' + #13#10 +
+    '  Write-Log "=== Starting DuoGamepadIsolator replacement ==="' + #13#10 +
+    '  Write-Log "srcBinary=$srcBinary"' + #13#10 +
+    '  Write-Log "dstBinary=$dstBinary"' + #13#10 +
+    '  if (-not (Test-Path $srcBinary)) { throw "Source binary not found: $srcBinary" }' + #13#10 +
+    '  if (-not (Test-Path $dstDir)) { New-Item -ItemType Directory -Path $dstDir -Force | Out-Null; Write-Log "Created $dstDir" }' + #13#10 +
+    '  Write-Log "Disabling service auto-start (ignore error if not exists)..."' + #13#10 +
+    '  try { & sc.exe config $svcName start= disabled 2>$null } catch {}' + #13#10 +
+    '  Start-Sleep -Milliseconds 500' + #13#10 +
+    '  Write-Log "Stopping service (ignore error if not exists)..."' + #13#10 +
+    '  try { & sc.exe stop $svcName 2>$null } catch {}' + #13#10 +
+    '  Start-Sleep -Seconds 2' + #13#10 +
+    '  Write-Log "Killing process (ignore error if not running)..."' + #13#10 +
+    '  try { & taskkill.exe /f /im DuoGamepadIsolator.exe 2>$null } catch {}' + #13#10 +
+    '  Start-Sleep -Seconds 2' + #13#10 +
+    '  Write-Log "Deleting service entry (ignore error if not exists)..."' + #13#10 +
+    '  try { & sc.exe delete $svcName 2>$null } catch {}' + #13#10 +
+    '  Start-Sleep -Seconds 1' + #13#10 +
+    '  for ($i = 0; $i -lt 15; $i++) {' + #13#10 +
+    '    $p = Get-Process -Name "DuoGamepadIsolator" -ErrorAction SilentlyContinue' + #13#10 +
+    '    if (-not $p) { break }' + #13#10 +
+    '    Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue' + #13#10 +
+    '    Start-Sleep -Milliseconds 500' + #13#10 +
+    '  }' + #13#10 +
+    '  if (Test-Path $dstBinary) {' + #13#10 +
+    '    Write-Log "Renaming old binary..."' + #13#10 +
+    '    $oldName = $dstBinary + ".old." + (Get-Date -Format "yyyyMMddHHmmss")' + #13#10 +
+    '    try { Move-Item -Path $dstBinary -Destination $oldName -Force -ErrorAction Stop; Write-Log "Renamed to $oldName" }' + #13#10 +
+    '    catch { Write-Log ("WARNING: Could not rename old binary: " + $_.Exception.Message) }' + #13#10 +
+    '  }' + #13#10 +
+    '  Get-ChildItem -Path $dstDir -Filter "DuoGamepadIsolator.exe.old.*" -ErrorAction SilentlyContinue |' + #13#10 +
+    '    Remove-Item -Force -ErrorAction SilentlyContinue' + #13#10 +
+    '  Write-Log "Copying new binary..."' + #13#10 +
+    '  $srcSize = (Get-Item $srcBinary).Length' + #13#10 +
+    '  $copyOk = $false' + #13#10 +
+    '  for ($attempt = 1; $attempt -le 5; $attempt++) {' + #13#10 +
+    '    try {' + #13#10 +
+    '      Copy-Item -Path $srcBinary -Destination $dstBinary -Force -ErrorAction Stop' + #13#10 +
+    '      $dstSize = (Get-Item $dstBinary -ErrorAction Stop).Length' + #13#10 +
+    '      if ($srcSize -eq $dstSize) { $copyOk = $true; Write-Log "Copy OK (attempt $attempt)"; break }' + #13#10 +
+    '      else { Write-Log "Size mismatch on attempt $attempt ($dstSize vs $srcSize)" }' + #13#10 +
+    '    } catch { Write-Log ("Copy failed attempt " + $attempt + ": " + $_.Exception.Message) }' + #13#10 +
+    '    Start-Sleep -Seconds 2' + #13#10 +
+    '  }' + #13#10 +
+    '  if (-not $copyOk) { throw "Failed to copy binary after 5 attempts" }' + #13#10 +
+    '  Write-Log "Installing new service..."' + #13#10 +
+    '  & $dstBinary --install' + #13#10 +
+    '  if ($LASTEXITCODE -ne 0) { Write-Log "WARNING: --install returned $LASTEXITCODE" }' + #13#10 +
+    '  else { Write-Log "Service installed and started." }' + #13#10 +
+    '  Write-Log "=== Replacement complete ==="' + #13#10 +
+    '  exit 0' + #13#10 +
+    '} catch {' + #13#10 +
+    '  Add-Content -Path $logFile -Value ("[{0:yyyy-MM-dd HH:mm:ss}] FATAL ERROR: {1}" -f (Get-Date), $_.Exception.Message)' + #13#10 +
+    '  exit 1' + #13#10 +
+    '}',
+    False);
+
+  // Execute the generated script
+  Exec('powershell.exe',
+    '-NoProfile -ExecutionPolicy Bypass -File "C:\Users\Public\_install_isolator.ps1"',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+  if ResultCode <> 0 then
+  begin
+    AbortInstall('Gamepad isolator - replacing DuoGamepadIsolator.exe',
+      'The PowerShell replacement script failed. Check the log for details:' + #13#10 +
+      'C:\Users\Public\duo_installer_isolator.log',
+      'Open the log above, then run the installer again.');
+  end;
+
+  Log('DuoGamepadIsolator replacement script completed successfully.');
 
   // ============================================================
   // Stop the service and kill any running DuoRdp.exe (with retry loop)
@@ -524,6 +646,16 @@ begin
     StatusMsg := StatusMsg + '  [OK] Chromium renderer fix (Chrome/Edge crash fix applied)' + #13#10
   else
     StatusMsg := StatusMsg + '  [--] Chromium renderer fix (skipped by user)' + #13#10;
+
+  if FileExists(ExpandConstant('{pf}\Nefarius Software Solutions\HidHide\x64\HidHideCLI.exe')) then
+    StatusMsg := StatusMsg + '  [OK] HidHide driver (gamepad cloaking ready)' + #13#10
+  else
+    StatusMsg := StatusMsg + '  [!!] HidHide driver - may need manual install' + #13#10;
+
+  if FileExists(ExpandConstant('{pf64}\DuoFix\DuoGamepadIsolator.exe')) then
+    StatusMsg := StatusMsg + '  [OK] Gamepad isolator service installed' + #13#10
+  else
+    StatusMsg := StatusMsg + '  [!!] Gamepad isolator - service may not be installed' + #13#10;
 
   StatusMsg := StatusMsg + '  [OK] PATH sanitizer (null bytes removed)' + #13#10;
   StatusMsg := StatusMsg + '  [OK] GPU preference set (high-performance GPU for sunshine/Duo)' + #13#10;

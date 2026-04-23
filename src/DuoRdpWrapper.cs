@@ -84,6 +84,17 @@ class DuoRdpWrapper {
         uint propertyBufferSize,
         uint flags);
 
+    [DllImport("setupapi.dll", SetLastError = true)]
+    static extern bool SetupDiGetDevicePropertyW(
+        IntPtr deviceInfoSet,
+        ref SP_DEVINFO_DATA deviceInfoData,
+        ref DEVPROPKEY propertyKey,
+        out uint propertyType,
+        byte[] propertyBuffer,
+        uint propertyBufferSize,
+        out uint requiredSize,
+        uint flags);
+
     [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
     static extern int CM_Get_Device_ID(uint dnDevInst, StringBuilder buffer, uint bufferLen, uint ulFlags);
 
@@ -462,24 +473,31 @@ class DuoRdpWrapper {
                 if (CM_Get_Device_ID(devData.devInst, sb, 512, 0) != 0) continue;
                 string instanceId = sb.ToString();
 
-                if (seen.Contains(instanceId)) continue;
-
                 bool isXinput = instanceId.IndexOf("IG_", StringComparison.OrdinalIgnoreCase) >= 0
                     || instanceId.IndexOf("VID_045E", StringComparison.OrdinalIgnoreCase) >= 0;
-                if (isXinput) LogDeviceAncestors(devData.devInst, instanceId, logPath);
 
-                if (IsViGEmDevice(devData.devInst)) {
-                    Log(logPath, "Jailer: ViGEm device detected: " + instanceId);
-                    byte[] sidBuf = BitConverter.GetBytes((uint)sessionId);
-                    DEVPROPKEY key = DEVPKEY_Device_SessionId;
-                    if (SetupDiSetDevicePropertyW(devs, ref devData, ref key, DEVPROP_TYPE_UINT32, sidBuf, 4, 0)) {
-                        CM_Reenumerate_DevNode(devData.devInst, CM_REENUMERATE_SYNCHRONOUS);
-                        Log(logPath, "  => Jailed into session " + sessionId + " successfully.");
-                        seen.Add(instanceId);
-                    } else {
-                        int err = Marshal.GetLastWin32Error();
-                        Log(logPath, "  !! Jailing failed. Win32Error=" + err);
-                    }
+                if (!IsViGEmDevice(devData.devInst)) continue;
+
+                // Check current SessionId — re-jail if missing or wrong (e.g. after Home button re-enumeration)
+                DEVPROPKEY key = DEVPKEY_Device_SessionId;
+                byte[] curBuf = new byte[4]; uint pt2; uint reqSz;
+                bool alreadyJailed = SetupDiGetDevicePropertyW(devs, ref devData, ref key, out pt2, curBuf, 4, out reqSz, 0)
+                    && BitConverter.ToUInt32(curBuf, 0) == (uint)sessionId;
+
+                if (alreadyJailed) { seen.Add(instanceId); continue; }
+
+                if (!seen.Contains(instanceId))
+                    if (isXinput) LogDeviceAncestors(devData.devInst, instanceId, logPath);
+
+                Log(logPath, "Jailer: ViGEm device detected: " + instanceId);
+                byte[] sidBuf = BitConverter.GetBytes((uint)sessionId);
+                if (SetupDiSetDevicePropertyW(devs, ref devData, ref key, DEVPROP_TYPE_UINT32, sidBuf, 4, 0)) {
+                    CM_Reenumerate_DevNode(devData.devInst, CM_REENUMERATE_SYNCHRONOUS);
+                    Log(logPath, "  => Jailed into session " + sessionId + " successfully.");
+                    seen.Add(instanceId);
+                } else {
+                    int err = Marshal.GetLastWin32Error();
+                    Log(logPath, "  !! Jailing failed. Win32Error=" + err);
                 }
             }
             // Log diagnóstico apenas no primeiro ciclo
@@ -544,13 +562,41 @@ class DuoRdpWrapper {
 
     static void Log(string logFile, string msg) {
         try {
-            File.AppendAllText(logFile, "[" + DateTime.Now.ToString("HH:mm:ss.fff") + "] " + msg + Environment.NewLine);
+            File.AppendAllText(logFile, "[" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + "] " + msg + Environment.NewLine);
+        } catch { }
+    }
+
+    // Mantém apenas linhas dos últimos N dias no log do wrapper.
+    static void TruncateWrapperLog(string logFile, int days = 2) {
+        try {
+            if (!File.Exists(logFile)) return;
+            string[] lines = File.ReadAllLines(logFile);
+            if (lines.Length == 0) return;
+            DateTime cutoff = DateTime.Now.AddDays(-days);
+            var keep = new List<string>();
+            foreach (var line in lines) {
+                if (line.Length < 24) { keep.Add(line); continue; }
+                if (line[0] != '[') { keep.Add(line); continue; }
+                DateTime dt;
+                if (DateTime.TryParseExact(line.Substring(1, 19), "yyyy-MM-dd HH:mm:ss",
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.None, out dt)) {
+                    if (dt >= cutoff) keep.Add(line);
+                } else {
+                    keep.Add(line);
+                }
+            }
+            if (keep.Count < lines.Length)
+                File.WriteAllLines(logFile, keep);
         } catch { }
     }
 
     static int Main(string[] args) {
         string logPath = @"C:\Users\Public\duordp_args.txt";
         string duoDir  = Path.GetDirectoryName(Process.GetCurrentProcess().MainModule.FileName);
+
+        // Limpa logs antigos do wrapper (mantem 2 dias)
+        TruncateWrapperLog(logPath, 2);
 
         // Single instance lock per user to prevent double login sessions
         bool createdNew;

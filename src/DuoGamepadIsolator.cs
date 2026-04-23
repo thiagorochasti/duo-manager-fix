@@ -64,6 +64,9 @@ class DuoGamepadIsolator : ServiceBase {
     [DllImport("cfgmgr32.dll")]
     static extern int CM_Enable_DevNode(uint dnDevInst, uint ulFlags);
 
+    [DllImport("cfgmgr32.dll")]
+    static extern int CM_Reenumerate_DevNode(uint dnDevInst, uint ulFlags);
+
     // =====================================================================
     // P/Invoke — SetupDi
     // =====================================================================
@@ -78,7 +81,7 @@ class DuoGamepadIsolator : ServiceBase {
         ref Guid InterfaceClassGuid, uint MemberIndex,
         ref SP_DEVICE_INTERFACE_DATA DeviceInterfaceData);
 
-    [DllImport("setupapi.dll", SetLastError = true)]
+    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     static extern bool SetupDiGetDeviceInterfaceDetail(
         IntPtr DeviceInfoSet, ref SP_DEVICE_INTERFACE_DATA DeviceInterfaceData,
         IntPtr DeviceInterfaceDetailData, uint DeviceInterfaceDetailDataSize,
@@ -105,6 +108,9 @@ class DuoGamepadIsolator : ServiceBase {
     [DllImport("wtsapi32.dll")]
     static extern void WTSFreeMemory(IntPtr pMemory);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    static extern int BroadcastSystemMessage(uint flags, ref uint lpInfo, uint Msg, IntPtr wParam, IntPtr lParam);
+
     [DllImport("advapi32.dll", SetLastError = true)]
     static extern bool InitializeAcl(IntPtr pAcl, uint nAclLength, uint dwAclRevision);
 
@@ -129,27 +135,6 @@ class DuoGamepadIsolator : ServiceBase {
 
     [DllImport("kernel32.dll")]
     static extern IntPtr LocalFree(IntPtr hMem);
-
-    // HidHide — acesso direto via IOCTL (não usa CLI para evitar deadlocks de handle)
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    static extern IntPtr CreateFileW(
-        string lpFileName, uint dwDesiredAccess, uint dwShareMode,
-        IntPtr lpSecurityAttributes, uint dwCreationDisposition,
-        uint dwFlagsAndAttributes, IntPtr hTemplateFile);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    static extern bool DeviceIoControl(
-        IntPtr hDevice, uint dwIoControlCode,
-        byte[] lpInBuffer, uint nInBufferSize,
-        byte[] lpOutBuffer, uint nOutBufferSize,
-        out uint lpBytesReturned, IntPtr lpOverlapped);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    static extern bool CloseHandle(IntPtr hObject);
-
-    // Converte path de aplicação (ex: C:\foo.exe) para NT full image name (\Device\HarddiskVolume...)
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    static extern uint QueryDosDevice(string lpDeviceName, StringBuilder lpTargetPath, uint ucchMax);
 
     // =====================================================================
     // Estruturas
@@ -203,27 +188,24 @@ class DuoGamepadIsolator : ServiceBase {
     const uint GENERIC_ALL           = 0x10000000;
     const uint WTS_USERNAME          = 5;
 
-    const int RECYCLE_WINDOW_MS = 4000;
+    const int WM_DEVICECHANGE        = 0x219;
+    const int DBT_DEVNODES_CHANGED   = 0x0007;
+    const uint BSF_POSTMESSAGE       = 0x00000010;
+    const uint BSM_APPLICATIONS      = 0x00000008;
+    const uint CM_REENUMERATE_NORMAL = 0x00000000;
 
-    static readonly Guid HID_GUID = new Guid("4D1E55B2-F16F-11CF-88CB-001111000030");
+    const int RECYCLE_WINDOW_MS = 1000;
+    const int PENDING_UNHIDE_SECONDS = 30;
+
+    static readonly Guid HID_GUID  = new Guid("4D1E55B2-F16F-11CF-88CB-001111000030");
+    static readonly Guid XUSB_GUID = new Guid("EC87F1E3-C13B-4100-B5F7-8B84D54260CB");
 
     const string LOG_PATH     = @"C:\Users\Public\duo_isolator.log";
     const string SERVICE_NAME = "DuoGamepadIsolator";
     const string HIDHIDE_CLI  = @"C:\Program Files\Nefarius Software Solutions\HidHide\x64\HidHideCLI.exe";
     const string SUNSHINE_EXE = @"C:\Program Files\Duo\sunshine.exe";
-
-    // HidHide IOCTL codes (de FilterDriverProxy.cpp)
-    // CTL_CODE(DeviceType=32769, Function, METHOD_BUFFERED=0, FILE_READ_DATA=1)
-    const uint IOCTL_HH_GET_WHITELIST = 0x80016000;
-    const uint IOCTL_HH_SET_WHITELIST = 0x80016004;
-    const uint IOCTL_HH_GET_BLACKLIST = 0x80016008;
-    const uint IOCTL_HH_SET_BLACKLIST = 0x8001600C;
-    const uint IOCTL_HH_GET_ACTIVE    = 0x80016010;
-    const uint IOCTL_HH_SET_ACTIVE    = 0x80016014;
-
-    const uint GENERIC_READ_ACCESS   = 0x80000000;
-    const uint FILE_SHARE_RWD        = 7; // READ | WRITE | DELETE
-    const uint OPEN_EXISTING_DISP    = 3;
+    const string XUSB_PERSIST_DIR  = @"C:\ProgramData\DuoFix";
+    const string XUSB_PERSIST_PATH = @"C:\ProgramData\DuoFix\xusb_blacklist.dat";
 
     // Dispositivos fisicos redirecionados via RDP que devem ser bloqueados no HOST.
     // O DS4 (DualShock 4) aparece como HID nativo quando redirecionado, e o Steam
@@ -247,13 +229,15 @@ class DuoGamepadIsolator : ServiceBase {
     // =====================================================================
 
     IntPtr             _hNotify = IntPtr.Zero;
+    IntPtr             _hNotifyXusb = IntPtr.Zero;
     CM_NOTIFY_CALLBACK _callbackDelegate;
+    CM_NOTIFY_CALLBACK _callbackDelegateXusb;
     Thread             _pollingThread;
     Thread             _hidHideThread;
+    Thread             _watchdogThread;   // HidHide watchdog anti-vazamento (Home button)
     volatile bool      _running;
     bool               _hidHideAvailable;
-    // NOTA: NÃO manter handle persistente ao HidHide — driver só permite 1 conexão.
-    // Usar OpenHidHideHandle() para abrir/fechar por operação.
+    // NOTA: Todas as operacoes HidHide usam HidHideCLI.exe (sem IOCTL direto).
     readonly object    _lock = new object();
     uint               _vigemBusInst = 0;
 
@@ -273,6 +257,15 @@ class DuoGamepadIsolator : ServiceBase {
     // Devices em processo de reciclo (CM_Disable/Enable) — não remover da blacklist durante REMOVAL
     readonly HashSet<string> _recyclingDevices = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+    // Delayed unhide: devices removidos que ainda devem ficar na blacklist por N segundos.
+    // Isso elimina a janela de visibilidade entre REMOVAL e ARRIVAL em reconexões rápidas (Moonlight).
+    readonly Dictionary<string, DateTime> _pendingUnhide = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+
+    // Protecao contra loop infinito: registra quando um device foi processado pela ultima vez.
+    // Se o mesmo symLink chegar em menos de 10s, ignora (evita reciclo infinito quando
+    // CM_Disable falha com veto e o device e recriado pelo callback REMOVAL).
+    readonly Dictionary<string, DateTime> _recentlyProcessed = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+
     // Registry security: instanceIds onde escrevemos SD no registro (para restaurar ao parar)
     readonly HashSet<string> _deviceIdsWithRegistrySecurity = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -283,6 +276,16 @@ class DuoGamepadIsolator : ServiceBase {
     // Estes pertencem ao admin do host e NAO devem ser bloqueados.
     readonly HashSet<string> _localPhysicalDevices = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     volatile bool _baselineComplete = false;
+
+    // XUSB blacklist PERSISTENTE em disco — sobrevive a reinicios do servico.
+    // O ViGEmBus reutiliza InstanceId fixo (ex: USB\VID_045E&PID_028E\01).
+    // Mantendo persistido, o device ja esta bloqueado antes de ser criado.
+    readonly HashSet<string> _persistentXusbBlacklist = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    // XUSB devices desabilitados via CM_Disable_DevNode — reabilitados no shutdown.
+    // Isso impede que a Steam detecte o controle no gap de criacao, e eh totalmente
+    // reversivel: ao parar o servico, todos sao reabilitados.
+    readonly HashSet<uint> _disabledXusbDevices = new HashSet<uint>();
 
     public DuoGamepadIsolator() { ServiceName = SERVICE_NAME; }
 
@@ -346,6 +349,30 @@ class DuoGamepadIsolator : ServiceBase {
         ClearState();
         FindViGEmBus();
         InitHidHide();
+        LoadPersistentXusbBlacklist();
+        PreemptiveViGEmBlacklist();
+
+        // Eleva prioridade para vencer a race condition contra a Steam (2-5ms)
+        try {
+            Process.GetCurrentProcess().PriorityClass = ProcessPriorityClass.High;
+            Thread.CurrentThread.Priority = ThreadPriority.Highest;
+            Log("Prioridade elevada: processo=High, thread=Highest.");
+        } catch (Exception ex) {
+            Log("AVISO: nao foi possivel elevar prioridade: " + ex.Message);
+        }
+
+        // Inicia watchdog HidHide que detecta e corrige vazamentos em ~200ms
+        if (HidHideNative.IsAvailable) {
+            _watchdogThread = new Thread(HidHideWatchdogLoop) {
+                IsBackground = true, Name = "HidHideWatchdog"
+            };
+            _watchdogThread.Start();
+            Log("HidHide: watchdog nativo ativado (50ms polling anti-Home via SetupDi).");
+        }
+
+        // Inicia rotator de log (limpa a cada 1h, mantem 2 dias)
+        new Thread(LogRotatorLoop) { IsBackground = true, Name = "LogRotator" }.Start();
+        Log("LogRotator: thread iniciada (rotacao a cada 1h, mantem 2 dias).");
 
         _callbackDelegate = new CM_NOTIFY_CALLBACK(OnDeviceEvent);
         var filter = new CM_NOTIFY_FILTER {
@@ -357,13 +384,30 @@ class DuoGamepadIsolator : ServiceBase {
 
         int rc = CM_Register_Notification(ref filter, IntPtr.Zero, _callbackDelegate, out _hNotify);
         if (rc == 0) {
-            Log("Modo: kernel callback. CPU = 0% em idle.");
+            Log("Modo: kernel callback HID. CPU = 0% em idle.");
             new Thread(InitialScan) { IsBackground = true, Name = "InitialScan" }.Start();
         } else {
             _hNotify = IntPtr.Zero;
-            Log("CM_Register_Notification rc=" + rc + ". Usando smart polling.");
+            Log("CM_Register_Notification HID rc=" + rc + ". Usando smart polling.");
             _pollingThread = new Thread(SmartPollingLoop) { IsBackground = true, Name = "Polling" };
             _pollingThread.Start();
+            return;
+        }
+
+        // Callback separado para XUSB/XInput — reage instantaneamente a criacao do device XInput
+        _callbackDelegateXusb = new CM_NOTIFY_CALLBACK(OnXusbEvent);
+        var filterXusb = new CM_NOTIFY_FILTER {
+            cbSize     = (uint)Marshal.SizeOf(typeof(CM_NOTIFY_FILTER)),
+            FilterType = CM_NOTIFY_FILTER_TYPE_DEVICEINTERFACE,
+            Flags      = 0, Reserved = 0, ClassGuid = XUSB_GUID,
+            _padding   = new byte[384]
+        };
+        int rcXusb = CM_Register_Notification(ref filterXusb, IntPtr.Zero, _callbackDelegateXusb, out _hNotifyXusb);
+        if (rcXusb == 0) {
+            Log("Modo: kernel callback XUSB ativado.");
+        } else {
+            _hNotifyXusb = IntPtr.Zero;
+            Log("CM_Register_Notification XUSB rc=" + rcXusb + " (XInput nao sera bloqueado preemptivamente).");
         }
     }
 
@@ -381,6 +425,10 @@ class DuoGamepadIsolator : ServiceBase {
             _physicalBlockedDevices.Clear();
             _localPhysicalDevices.Clear();
             _baselineComplete = false;
+            _pendingUnhide.Clear();
+            _recentlyProcessed.Clear();
+            // NOTA: _persistentXusbBlacklist e _disabledXusbDevices NAO sao limpos —
+            // sobrevivem a reinicios do servico e sao restaurados no shutdown.
         }
         foreach (var id in toRestore) RestoreDeviceSecurityInRegistry(id);
     }
@@ -427,15 +475,179 @@ class DuoGamepadIsolator : ServiceBase {
         Log("Scan inicial concluido.");
     }
 
+    // =====================================================================
+    // Persistencia XUSB — sobrevive a reinicios do servico
+    // =====================================================================
+
+    // =====================================================================
+    // Pre-Creation Blacklist — bloqueia IDs ViGEm ANTES de qualquer device ser criado
+    // =====================================================================
+    // O ViGEmBus usa IDs fixos e previsiveis para controles Xbox 360:
+    //   XUSB: USB\VID_045E&PID_028E\01, \02, \03...
+    //   HID:  HID\VID_045E&PID_028E&IG_XX\... (sufixo aleatorio, nao previsivel)
+    //
+    // Estrategia:
+    //   1. Pre-gerar todos os XUSBs possiveis (\01 a \08) e injetar na blacklist.
+    //      O device XUSB nasce JA BLOQUEADO (0ms de janela).
+    //   2. Varredura proativa com SetupDi: acha HIDs ViGEm ja presentes e bloqueia.
+    //   3. Callbacks + CM_Disable permanecem como rede de seguranca.
+
+    void PreemptiveViGEmBlacklist() {
+        if (!_hidHideAvailable) {
+            Log("Preemptive: HidHide indisponivel — pulando pre-geracao.");
+            return;
+        }
+
+        var preemptiveIds = new List<string>();
+
+        // 1. XUSB previsiveis — \01 a \08 para margem
+        // O ViGEmBus reutiliza estes suffixos fixos a cada conexao.
+        // Cobrimos TODOS os modos de emulacao: Xbox 360, Xbox One/Series, DS4, DualSense.
+        string[] xusbVidsPids = new string[] {
+            // Microsoft Xbox 360
+            "VID_045E&PID_028E",
+            // Microsoft Xbox One (USB e Bluetooth)
+            "VID_045E&PID_02FF",
+            "VID_045E&PID_02EA",
+            // Microsoft Xbox Series X|S
+            "VID_045E&PID_0B12",
+            "VID_045E&PID_0B13",
+            // Sony DualShock 4
+            "VID_054C&PID_05C4",
+            "VID_054C&PID_09CC",
+            // Sony DualSense (PS5)
+            "VID_054C&PID_0CE6",
+            "VID_054C&PID_0DF2",
+        };
+        foreach (var vidpid in xusbVidsPids) {
+            for (int i = 1; i <= 8; i++) {
+                preemptiveIds.Add("USB\\" + vidpid + "\\" + i.ToString("D2"));
+            }
+        }
+
+        // 2. HID: varredura proativa — acha HIDs ViGEm ja presentes no sistema
+        // e os adiciona a lista preemptiva. O sufixo do HID eh aleatorio,
+        // entao nao podemos pre-gerar — apenas detectar os que ja existem.
+        var guid = HID_GUID;
+        IntPtr devs = SetupDiGetClassDevs(
+            ref guid, IntPtr.Zero, IntPtr.Zero, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+        if (devs != new IntPtr(-1)) {
+            try {
+                uint idx = 0;
+                while (true) {
+                    var iface = new SP_DEVICE_INTERFACE_DATA {
+                        cbSize = (uint)Marshal.SizeOf(typeof(SP_DEVICE_INTERFACE_DATA))
+                    };
+                    if (!SetupDiEnumDeviceInterfaces(devs, IntPtr.Zero, ref guid, idx, ref iface)) break;
+                    idx++;
+                    var devInfo = new SP_DEVINFO_DATA {
+                        cbSize = (uint)Marshal.SizeOf(typeof(SP_DEVINFO_DATA))
+                    };
+                    string path = GetDevicePath(devs, ref iface, ref devInfo);
+                    if (path == null) continue;
+                    if (IsViGEmDevice(devInfo.DevInst)) {
+                        string instanceId = SymLinkToInstanceId(path);
+                        preemptiveIds.Add(instanceId);
+                        Log("Preemptive: HID ViGEm detectado proactivemente (" + instanceId + ")");
+                    }
+                }
+            } finally { SetupDiDestroyDeviceInfoList(devs); }
+        }
+
+        // 3. Injeta todos os IDs pre-calculados na blacklist do HidHide
+        if (preemptiveIds.Count > 0) {
+            HidHideNative.HideDevices(preemptiveIds);
+            lock (_lock) {
+                foreach (var id in preemptiveIds) _hiddenDevices.Add(id);
+            }
+            Log("Preemptive: " + preemptiveIds.Count + " ID(s) pre-bloqueado(s) antes de qualquer conexao.");
+        }
+    }
+
+    void LoadPersistentXusbBlacklist() {
+        try {
+            if (!File.Exists(XUSB_PERSIST_PATH)) {
+                Log("XUSB persist: arquivo nao existe (primeira execucao).");
+                return;
+            }
+            var lines = File.ReadAllLines(XUSB_PERSIST_PATH);
+            int loaded = 0;
+            lock (_lock) {
+                foreach (var line in lines) {
+                    string id = line.Trim();
+                    if (string.IsNullOrEmpty(id)) continue;
+                    if (id.StartsWith("#")) continue; // comentario
+                    _persistentXusbBlacklist.Add(id);
+                    loaded++;
+                }
+            }
+            if (loaded > 0 && _hidHideAvailable) {
+                // Pre-popula a blacklist do HidHide ANTES de qualquer callback.
+                // Isso garante que se o ViGEmBus recriar um XUSB com ID ja
+                // conhecido, ele ja esta bloqueado antes de existir fisicamente.
+                HidHideNative.HideDevices(new List<string>(_persistentXusbBlacklist));
+                lock (_lock) {
+                    foreach (var id in _persistentXusbBlacklist) _hiddenDevices.Add(id);
+                }
+                Log("XUSB persist: " + loaded + " ID(s) carregado(s) e pre-bloqueado(s) no HidHide.");
+            } else {
+                Log("XUSB persist: " + loaded + " ID(s) carregado(s) (HidHide indisponivel, apenas memoria).");
+            }
+        } catch (Exception ex) { Log("XUSB persist load erro: " + ex.Message); }
+    }
+
+    void SavePersistentXusbBlacklist() {
+        try {
+            Directory.CreateDirectory(XUSB_PERSIST_DIR);
+            var sb = new StringBuilder();
+            sb.AppendLine("# DuoFix XUSB Persistent Blacklist");
+            sb.AppendLine("# Gerado automaticamente — NAO edite manualmente");
+            sb.AppendLine("# " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+            lock (_lock) {
+                foreach (var id in _persistentXusbBlacklist)
+                    sb.AppendLine(id);
+            }
+            File.WriteAllText(XUSB_PERSIST_PATH, sb.ToString());
+        } catch (Exception ex) { Log("XUSB persist save erro: " + ex.Message); }
+    }
+
+    void AddToPersistentXusbBlacklist(string instanceId) {
+        bool added;
+        lock (_lock) { added = _persistentXusbBlacklist.Add(instanceId); }
+        if (added) {
+            SavePersistentXusbBlacklist();
+            Log("XUSB persist: ID adicionado (" + instanceId + ")");
+        }
+    }
+
     void Stop2() {
         _running = false;
         if (_hNotify != IntPtr.Zero) {
             CM_Unregister_Notification(_hNotify);
             _hNotify = IntPtr.Zero;
         }
+        if (_hNotifyXusb != IntPtr.Zero) {
+            CM_Unregister_Notification(_hNotifyXusb);
+            _hNotifyXusb = IntPtr.Zero;
+        }
         if (_pollingThread != null) _pollingThread.Join(5000);
         if (_hidHideThread  != null) _hidHideThread.Join(3000);
+        if (_watchdogThread != null) _watchdogThread.Join(2000);
         ShutdownHidHide();
+
+        // Reabilita todos os XUSBs desabilitados via CM_Disable — reversibilidade total.
+        // O controle volta a funcionar normalmente para o host apos o servico parar.
+        uint[] toReEnable;
+        lock (_lock) {
+            toReEnable = new uint[_disabledXusbDevices.Count];
+            _disabledXusbDevices.CopyTo(toReEnable);
+            _disabledXusbDevices.Clear();
+        }
+        foreach (var devInst in toReEnable) {
+            int rc = CM_Enable_DevNode(devInst, 0);
+            Log("XUSB reabilitado no shutdown (devInst=" + devInst + ", rc=" + rc + ")");
+        }
+
         Log("Parado.");
     }
 
@@ -447,46 +659,46 @@ class DuoGamepadIsolator : ServiceBase {
     // anterior do CLI) já tiver o handle, o CLI trava indefinidamente.
     // Usando DeviceIoControl direto com FILE_SHARE flags, evitamos deadlocks.
 
-    // Abre handle transiente ao HidHide — DEVE ser fechado pelo chamador.
-    // Retorna IntPtr.Zero se falhar.
-    IntPtr OpenHidHideHandle() {
-        IntPtr h = CreateFileW(@"\\.\HidHide", GENERIC_READ_ACCESS, FILE_SHARE_RWD,
-            IntPtr.Zero, OPEN_EXISTING_DISP, 0, IntPtr.Zero);
-        if (h == new IntPtr(-1)) return IntPtr.Zero;
-        return h;
-    }
+    // =====================================================================
+    // HidHide — TODAS as operacoes via HidHideCLI.exe (sem IOCTL direto)
+    // =====================================================================
+    // Motivo: o driver \.\HidHide so permite UM handle por vez.
+    // Misturar IOCTL direto com chamadas ao HidHideCLI.exe causa race condition
+    // e falhas "handle falhou". O CLI tem retry interno e eh mais robusto.
 
     void InitHidHide() {
-        // Testa se o driver está acessível (abre e fecha imediatamente)
-        IntPtr test = OpenHidHideHandle();
-        if (test == IntPtr.Zero) {
-            int err = Marshal.GetLastWin32Error();
-            Log("HidHide: driver nao acessivel (err=" + err + ") — isolamento XInput desabilitado.");
+        if (!HidHideNative.IsAvailable) {
+            Log("HidHide: driver nao encontrado — isolamento XInput desabilitado.");
             _hidHideAvailable = false;
             return;
         }
-        CloseHandle(test);
+        // Abre handle persistente para o driver (zero latencia)
+        if (!HidHideNative.Open()) {
+            Log("HidHide: falha ao abrir handle persistente — isolamento XInput desabilitado.");
+            _hidHideAvailable = false;
+            return;
+        }
         _hidHideAvailable = true;
-        Log("HidHide: driver acessivel (handle transiente — sem lock persistente).");
+        Log("HidHide: handle persistente aberto (IOCTL nativo, ~0.1ms).");
 
         // Limpa blacklist de execucoes anteriores (crash, servico morto no meio, etc.)
         try {
-            var stale = HidHideGetMultiString(IOCTL_HH_GET_BLACKLIST);
+            var stale = HidHideNative.GetHiddenDevices();
             if (stale.Count > 0) {
-                HidHideSetMultiString(IOCTL_HH_SET_BLACKLIST, new List<string>());
+                HidHideNative.UnhideDevices(stale);
                 Log("HidHide: " + stale.Count + " entrada(s) obsoleta(s) removida(s) da blacklist.");
             }
         } catch (Exception ex) { Log("HidHide init limpeza erro: " + ex.Message); }
 
         // Ativar cloak
-        HidHideSetActive(true);
+        HidHideNative.SetCloak(true);
         Log("HidHide: cloak ativado (XInput bloqueado para processos nao-whitelistados).");
 
         // Whitelist do Apollo/Sunshine — precisa sempre ver o device
         string sun1 = @"C:\Program Files\Duo\sunshine.exe";
         string sun2 = @"C:\Program Files\Apollo\sunshine.exe";
-        if (File.Exists(sun1)) HidHideAddToWhitelist(sun1);
-        else if (File.Exists(sun2)) HidHideAddToWhitelist(sun2);
+        if (File.Exists(sun1)) HidHideNative.AddToWhitelist(sun1);
+        else if (File.Exists(sun2)) HidHideNative.AddToWhitelist(sun2);
 
         // Thread que monitora processos das sessoes RDP e atualiza a whitelist
         _hidHideThread = new Thread(HidHideWhitelistLoop) {
@@ -507,126 +719,61 @@ class DuoGamepadIsolator : ServiceBase {
 
         if (!_hidHideAvailable) return;
 
-        // Limpa blacklist completa — não usa _hiddenDevices porque callbacks tardios
-        // podem tê-lo esvaziado antes do shutdown. Zerando tudo garantimos estado limpo.
+        // Limpa blacklist de HID/USB, mas PRESERVA XUSBs persistentes.
+        // Os XUSBs devem permanecer bloqueados mesmo entre reinicios do servico.
         try {
-            var antes = HidHideGetMultiString(IOCTL_HH_GET_BLACKLIST);
-            HidHideSetMultiString(IOCTL_HH_SET_BLACKLIST, new List<string>());
-            Log("HidHide: blacklist limpa (" + antes.Count + " entradas removidas).");
+            var antes = HidHideNative.GetHiddenDevices();
+            var toRemove = new List<string>();
+            lock (_lock) {
+                foreach (var id in antes) {
+                    // Preserva XUSBs na blacklist persistente
+                    if (_persistentXusbBlacklist.Contains(id)) continue;
+                    toRemove.Add(id);
+                }
+            }
+            if (toRemove.Count > 0) {
+                HidHideNative.UnhideDevices(toRemove);
+                Log("HidHide: blacklist limpa (" + toRemove.Count + " HID/USB removidos, " + (antes.Count - toRemove.Count) + " XUSB preservados).");
+            } else if (antes.Count > 0) {
+                Log("HidHide: blacklist mantida (" + antes.Count + " XUSBs persistentes preservados).");
+            }
         } catch (Exception ex) { Log("HidHide shutdown blacklist erro: " + ex.Message); }
 
-        lock (_lock) { _hiddenDevices.Clear(); }
+        lock (_lock) {
+            _hiddenDevices.RemoveWhere(id => !_persistentXusbBlacklist.Contains(id));
+        }
 
         // Desativa cloak
-        HidHideSetActive(false);
+        HidHideNative.SetCloak(false);
         Log("HidHide: cloak desativado.");
+
+        // Fecha handle persistente
+        HidHideNative.Close();
+        Log("HidHide: handle persistente fechado.");
     }
 
-    // ---- IOCTL helpers ----
-
-    void HidHideSetActive(bool active) {
-        if (!_hidHideAvailable) return;
-        IntPtr h = OpenHidHideHandle();
-        if (h == IntPtr.Zero) { Log("HidHide SET_ACTIVE: handle falhou"); return; }
-        try {
-            byte[] buf = new byte[] { (byte)(active ? 1 : 0) };
-            uint ret;
-            if (!DeviceIoControl(h, IOCTL_HH_SET_ACTIVE, buf, 1, null, 0, out ret, IntPtr.Zero))
-                Log("HidHide SET_ACTIVE erro=" + Marshal.GetLastWin32Error());
-        } finally { CloseHandle(h); }
-    }
-
-    List<string> HidHideGetMultiString(uint ioctl) {
-        var result = new List<string>();
-        if (!_hidHideAvailable) return result;
-        IntPtr h = OpenHidHideHandle();
-        if (h == IntPtr.Zero) return result;
-        try {
-            byte[] buf = new byte[65536];
-            uint ret;
-            if (!DeviceIoControl(h, ioctl, null, 0, buf, (uint)buf.Length, out ret, IntPtr.Zero))
-                return result;
-            string all = Encoding.Unicode.GetString(buf, 0, (int)ret);
-            foreach (string s in all.Split('\0'))
-                if (!string.IsNullOrEmpty(s)) result.Add(s);
-        } finally { CloseHandle(h); }
-        return result;
-    }
-
-    void HidHideSetMultiString(uint ioctl, List<string> items) {
-        if (!_hidHideAvailable) return;
-        IntPtr h = OpenHidHideHandle();
-        if (h == IntPtr.Zero) { Log("HidHide SET ioctl=0x" + ioctl.ToString("X") + ": handle falhou"); return; }
-        try {
-            var sb = new StringBuilder();
-            foreach (var s in items) { sb.Append(s); sb.Append('\0'); }
-            sb.Append('\0'); // double-null terminator
-            byte[] data = Encoding.Unicode.GetBytes(sb.ToString());
-            uint ret;
-            if (!DeviceIoControl(h, ioctl, data, (uint)data.Length, null, 0, out ret, IntPtr.Zero))
-                Log("HidHide SET ioctl=0x" + ioctl.ToString("X") + " erro=" + Marshal.GetLastWin32Error());
-        } finally { CloseHandle(h); }
-    }
+    // ---- Wrappers CLI (sem IOCTL) ----
 
     void HidHideAddToBlacklist(string instanceId) {
         if (!_hidHideAvailable) return;
-        var current = HidHideGetMultiString(IOCTL_HH_GET_BLACKLIST);
-        // Não duplicar
-        foreach (var s in current)
-            if (s.Equals(instanceId, StringComparison.OrdinalIgnoreCase)) return;
-        current.Add(instanceId);
-        HidHideSetMultiString(IOCTL_HH_SET_BLACKLIST, current);
+        HidHideNative.HideDevice(instanceId);
     }
 
     void HidHideRemoveFromBlacklist(string instanceId) {
         if (!_hidHideAvailable) return;
-        var current = HidHideGetMultiString(IOCTL_HH_GET_BLACKLIST);
-        var keep = new List<string>();
-        foreach (var s in current)
-            if (!s.Equals(instanceId, StringComparison.OrdinalIgnoreCase)) keep.Add(s);
-        HidHideSetMultiString(IOCTL_HH_SET_BLACKLIST, keep);
-    }
-
-    // Converte path Win32 (C:\foo.exe) para NT full image name (\Device\HarddiskVolumeN\foo.exe)
-    // necessário para a whitelist do HidHide que opera com NT paths.
-    static string ToNtImagePath(string win32Path) {
-        try {
-            string drive = System.IO.Path.GetPathRoot(win32Path);
-            if (string.IsNullOrEmpty(drive)) return win32Path;
-            string letter = drive.TrimEnd('\\');
-            var sb = new StringBuilder(260);
-            uint len = QueryDosDevice(letter, sb, 260);
-            if (len == 0) return win32Path;
-            string ntDrive = sb.ToString(); // ex: \Device\HarddiskVolume3
-            return ntDrive + win32Path.Substring(letter.Length);
-        } catch { return win32Path; }
+        HidHideNative.UnhideDevice(instanceId);
     }
 
     void HidHideAddToWhitelist(string exePath) {
         if (!_hidHideAvailable || !File.Exists(exePath)) return;
-        string ntPath = ToNtImagePath(exePath);
-        var current = HidHideGetMultiString(IOCTL_HH_GET_WHITELIST);
-        foreach (var s in current)
-            if (s.Equals(ntPath, StringComparison.OrdinalIgnoreCase)) return;
-        current.Add(ntPath);
-        HidHideSetMultiString(IOCTL_HH_SET_WHITELIST, current);
-        Log("HidHide whitelist +: " + exePath + " (" + ntPath + ")");
+        HidHideNative.AddToWhitelist(exePath);
+        Log("HidHide whitelist +: " + exePath);
     }
 
     void HidHideRemoveFromWhitelist(string exePath) {
         if (!_hidHideAvailable) return;
-        string ntPath = ToNtImagePath(exePath);
-        var current = HidHideGetMultiString(IOCTL_HH_GET_WHITELIST);
-        var keep = new List<string>();
-        bool found = false;
-        foreach (var s in current) {
-            if (s.Equals(ntPath, StringComparison.OrdinalIgnoreCase)) { found = true; continue; }
-            keep.Add(s);
-        }
-        if (found) {
-            HidHideSetMultiString(IOCTL_HH_SET_WHITELIST, keep);
-            Log("HidHide whitelist -: " + exePath);
-        }
+        HidHideNative.RemoveFromWhitelist(exePath);
+        Log("HidHide whitelist -: " + exePath);
     }
 
     // Monitora processos nas sessoes RDP (nao-console) e mantem a whitelist sincronizada.
@@ -634,6 +781,11 @@ class DuoGamepadIsolator : ServiceBase {
     // excluidos da whitelist para evitar que o host veja o controle virtual pelo mesmo exe.
     void HidHideWhitelistLoop() {
         var tracked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Paths que NUNCA devem ser removidos da whitelist (processos criticos do streaming)
+        var neverRemove = new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
+            @"C:\Program Files\Duo\sunshine.exe",
+            @"C:\Program Files\Apollo\sunshine.exe"
+        };
         while (_running) {
             for (int i = 0; i < 20 && _running; i++) Thread.Sleep(100);
             try {
@@ -665,13 +817,170 @@ class DuoGamepadIsolator : ServiceBase {
                 }
 
                 var toRemove = new List<string>();
-                foreach (var path in tracked)
+                foreach (var path in tracked) {
+                    if (neverRemove.Contains(path)) continue; // NUNCA remover processos criticos
                     if (!rdpPaths.Contains(path) || consolePaths.Contains(path)) toRemove.Add(path);
+                }
                 foreach (var path in toRemove) {
                     HidHideRemoveFromWhitelist(path);
                     tracked.Remove(path);
                 }
             } catch (Exception ex) { Log("HidHide whitelist loop erro: " + ex.Message); }
+        }
+    }
+
+    // =====================================================================
+    // Watchdog HidHide — detecta e corrige vazamento pos-Home button
+    // =====================================================================
+    // Problema: ao pressionar Home, o controle desliga e religa com novo
+    // InstanceId. Durante a reconexao, fica visivel para todos ate o callback
+    // CM_Register_Notification processar. Esse watchdog roda a cada 200ms
+    // e forca a blacklist via IOCTL nativo antes que o host perceba.
+
+    // Lista dispositivos HID gaming REALMENTE conectados via SetupDi.
+    // NAO use GetHiddenDevices() como proxy — isso torna o watchdog cego.
+    List<string> GetActiveGamingDevices() {
+        var result = new List<string>();
+        var guid = HID_GUID;
+        IntPtr devs = SetupDiGetClassDevs(
+            ref guid, IntPtr.Zero, IntPtr.Zero, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+        if (devs == new IntPtr(-1)) return result;
+        try {
+            uint idx = 0;
+            while (true) {
+                var iface = new SP_DEVICE_INTERFACE_DATA {
+                    cbSize = (uint)Marshal.SizeOf(typeof(SP_DEVICE_INTERFACE_DATA))
+                };
+                if (!SetupDiEnumDeviceInterfaces(devs, IntPtr.Zero, ref guid, idx, ref iface)) break;
+                idx++;
+                var devInfo = new SP_DEVINFO_DATA {
+                    cbSize = (uint)Marshal.SizeOf(typeof(SP_DEVINFO_DATA))
+                };
+                string path = GetDevicePath(devs, ref iface, ref devInfo);
+                if (path == null) continue;
+                string instanceId = SymLinkToInstanceId(path);
+                if (string.IsNullOrEmpty(instanceId)) continue;
+
+                // Target fisico (DS4/DualSense/Xbox redirecionado via RDP)?
+                bool isTarget = false;
+                for (int j = 0; j < PHYSICAL_BLOCK_VIDPIDS.Length; j++)
+                    if (instanceId.IndexOf(PHYSICAL_BLOCK_VIDPIDS[j], StringComparison.OrdinalIgnoreCase) >= 0)
+                        { isTarget = true; break; }
+
+                // Target virtual (ViGEmBus)?
+                if (!isTarget && IsViGEmDevice(devInfo.DevInst))
+                    isTarget = true;
+
+                if (isTarget)
+                    result.Add(instanceId);
+            }
+        } finally { SetupDiDestroyDeviceInfoList(devs); }
+        return result;
+    }
+
+    // Loga diagnostico completo do HidHide para debug do Home button.
+    // Chamado quando o watchdog detecta vazamento ou a cada N ciclos.
+    void LogHidHideDiagnostics(string reason) {
+        try {
+            bool cloak = HidHideNative.GetCloakState();
+            var apps = HidHideNative.GetWhitelistedApps();
+            var hidden = HidHideNative.GetHiddenDevices();
+            Log("DIAG_HIDHIDE [" + reason + "]: cloak=" + cloak + " | hidden=" + hidden.Count + " | whitelisted_apps=" + apps.Count);
+            foreach (var app in apps)
+                Log("  DIAG_APP: " + app);
+        } catch (Exception ex) { Log("DIAG_HIDHIDE erro: " + ex.Message); }
+    }
+
+    void HidHideWatchdogLoop() {
+        int cycle = 0;
+        bool lastCloakState = true;
+        while (_running) {
+            Thread.Sleep(50); // 50ms polling — deteccao rapida de vazamentos
+            if (!_running) break;
+            try {
+                // 0. Processa pending unhide expirados (delayed unhide de 30s)
+                // IMPORTANTE: so remove da blacklist se o device NAO existir mais.
+                // O reciclo (CM_Disable/Enable) causa um REMOVAL transiente que agenda
+                // pending unhide, mas o device e recriado imediatamente. Se executarmos
+                // o unhide enquanto o device ainda existe, ele fica visivel para a Steam.
+                var toUnhide = new List<string>();
+                var toKeepHidden = new List<string>();
+                lock (_lock) {
+                    var now = DateTime.Now;
+                    foreach (var kv in _pendingUnhide) {
+                        if (now >= kv.Value) {
+                            if (IsDevicePresent(kv.Key)) {
+                                toKeepHidden.Add(kv.Key);
+                            } else {
+                                toUnhide.Add(kv.Key);
+                            }
+                        }
+                    }
+                    foreach (var id in toUnhide) {
+                        _pendingUnhide.Remove(id);
+                        _hiddenDevices.Remove(id);
+                    }
+                    foreach (var id in toKeepHidden) {
+                        // Reseta o timer para +30s — tenta novamente depois
+                        _pendingUnhide[id] = DateTime.Now.AddSeconds(PENDING_UNHIDE_SECONDS);
+                    }
+                }
+                foreach (var id in toUnhide) {
+                    HidHideRemoveFromBlacklist(id);
+                    Log("  HidHide: delayed unhide executado (" + id + ")");
+                }
+                foreach (var id in toKeepHidden) {
+                    Log("  HidHide: delayed unhide ADIADO (device ainda presente: " + id + ")");
+                }
+
+                // 1. Lista devices gaming REALMENTE conectados via SetupDi (nao use hidden como proxy)
+                var gaming = GetActiveGamingDevices();
+                if (gaming == null || gaming.Count == 0) continue;
+
+                // 2. Lista devices ja escondidos
+                var hidden = HidHideNative.GetHiddenDevices();
+                var hiddenSet = new HashSet<string>(hidden, StringComparer.OrdinalIgnoreCase);
+
+                // 3. Detecta mudanca no cloak (ex: Steam desativou globalmente)
+                bool currentCloak = HidHideNative.GetCloakState();
+                if (currentCloak != lastCloakState) {
+                    Log("ALERTA_HIDHIDE: cloak mudou de " + lastCloakState + " para " + currentCloak + " — possivel interferencia externa (Steam/DS4Windows/etc).");
+                    LogHidHideDiagnostics("cloak_changed");
+                    lastCloakState = currentCloak;
+                }
+
+                // 4. Detecta targets que vazaram (deveriam estar escondidos mas nao estao)
+                var leaked = new List<string>();
+                foreach (var instanceId in gaming) {
+                    // Target fisico (DS4/DualSense/Xbox redirecionado via RDP)?
+                    bool isPhysicalTarget = false;
+                    for (int j = 0; j < PHYSICAL_BLOCK_VIDPIDS.Length; j++)
+                        if (instanceId.IndexOf(PHYSICAL_BLOCK_VIDPIDS[j], StringComparison.OrdinalIgnoreCase) >= 0)
+                            { isPhysicalTarget = true; break; }
+
+                    // Target virtual (ViGEmBus) que ja foi processado antes?
+                    bool isVirtualTarget = false;
+                    lock (_lock) {
+                        isVirtualTarget = _hiddenDevices.Contains(instanceId) || _recyclingDevices.Contains(instanceId) || _pendingUnhide.ContainsKey(instanceId);
+                    }
+
+                    if ((isPhysicalTarget || isVirtualTarget) && !hiddenSet.Contains(instanceId))
+                        leaked.Add(instanceId);
+                }
+
+                if (leaked.Count > 0) {
+                    LogHidHideDiagnostics("pre_fix_leak");
+                    HidHideNative.HideDevices(leaked);
+                    foreach (var id in leaked)
+                        Log("HidHide WATCHDOG: device vazado re-escondido (" + id + ")");
+                    LogHidHideDiagnostics("post_fix_leak");
+                }
+
+                if (cycle == 0) Log("HidHide watchdog: ciclo 0 — " + gaming.Count + " gaming, " + hidden.Count + " hidden, " + leaked.Count + " leaked, " + _pendingUnhide.Count + " pending.");
+                // A cada ~5 minutos (6000 ciclos * 50ms)
+                if (cycle > 0 && cycle % 6000 == 0) LogHidHideDiagnostics("periodic_5min");
+                cycle++;
+            } catch (Exception ex) { Log("HidHide watchdog erro: " + ex.Message); }
         }
     }
 
@@ -683,6 +992,14 @@ class DuoGamepadIsolator : ServiceBase {
         int last = s.LastIndexOf('#');
         if (last > 0) s = s.Substring(0, last);
         return s.Replace('#', '\\').ToUpperInvariant();
+    }
+
+    // Forca re-enumeracao de dispositivos HID em todos os aplicativos (Steam, etc.)
+    static void NotifyDeviceChange() {
+        try {
+            uint recipients = BSM_APPLICATIONS;
+            BroadcastSystemMessage(BSF_POSTMESSAGE, ref recipients, (uint)WM_DEVICECHANGE, (IntPtr)DBT_DEVNODES_CHANGED, IntPtr.Zero);
+        } catch { }
     }
 
     // =====================================================================
@@ -697,7 +1014,7 @@ class DuoGamepadIsolator : ServiceBase {
 
             if (Action == CM_NOTIFY_ACTION_DEVICEINTERFACEREMOVAL) {
                 string instanceId = SymLinkToInstanceId(symLink);
-                bool unhide = false;
+                bool doUnhide = false;
 
                 lock (_lock) {
                     _done.Remove(symLink);
@@ -718,40 +1035,41 @@ class DuoGamepadIsolator : ServiceBase {
                         }
                     }
 
-                    // NÃO remover da blacklist se:
-                    //   - o device está em reciclo (CM_Disable/Enable)
-                    //   - o device é um controle fisico bloqueado (DS4/DualSense/Xbox via RDP)
-                    if (_hidHideAvailable && !_recyclingDevices.Contains(instanceId)
-                        && !_physicalBlockedDevices.Contains(instanceId)) {
-                        if (_hiddenDevices.Remove(instanceId)) unhide = true;
-
-                        // Remover tambem o pai USB (se registrado) ao remover o HID
-                        string usbId = GetDeviceId(parent);
-                        if (!string.IsNullOrEmpty(usbId) && !_recyclingDevices.Contains(usbId) && _hiddenDevices.Remove(usbId)) {
-                            HidHideRemoveFromBlacklist(usbId);
-                            Log("  HidHide: USB pai restaurado (" + usbId + ")");
-                        }
-                    }
+                    // FISICO: nunca remove da blacklist (mantém bloqueio permanente)
                     if (_physicalBlockedDevices.Contains(instanceId)) {
                         Log("FISICO: REMOVAL ignorado — mantendo bloqueio (" + instanceId + ")");
+                        return 0;
+                    }
+
+                    // VIRTUAL: delayed unhide — mantém na blacklist por 30s para absorver
+                    // reconexões rápidas do Moonlight. Se o device for recriado nesse
+                    // período, o ARRIVAL cancela o pending unhide.
+                    if (_hidHideAvailable && !_recyclingDevices.Contains(instanceId)) {
+                        if (_hiddenDevices.Contains(instanceId)) {
+                            _pendingUnhide[instanceId] = DateTime.Now.AddSeconds(PENDING_UNHIDE_SECONDS);
+                            Log("  HidHide: HID agendado para unhide em " + PENDING_UNHIDE_SECONDS + "s (" + instanceId + ")");
+                        }
+
+                        // Também agenda unhide do pai USB
+                        string usbId = GetDeviceId(parent);
+                        if (!string.IsNullOrEmpty(usbId) && !_recyclingDevices.Contains(usbId) && _hiddenDevices.Contains(usbId)) {
+                            _pendingUnhide[usbId] = DateTime.Now.AddSeconds(PENDING_UNHIDE_SECONDS);
+                            Log("  HidHide: USB pai agendado para unhide em " + PENDING_UNHIDE_SECONDS + "s (" + usbId + ")");
+                        }
+                    } else if (!_hidHideAvailable) {
+                        // HidHide indisponível: remove imediatamente (não temos como proteger)
+                        doUnhide = _hiddenDevices.Remove(instanceId);
                     }
                 }
 
-                if (unhide) {
+                if (doUnhide) {
                     HidHideRemoveFromBlacklist(instanceId);
-                    Log("  HidHide: HID restaurado (" + instanceId + ")");
+                    Log("  HidHide: HID restaurado (HidHide indisponivel) (" + instanceId + ")");
                 }
                 return 0;
             }
 
             if (Action != CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL) return 0;
-
-            // Dispositivo fisico alvo (DS4/DualSense via RDP)? Bloqueia direto, sem passar pelo fluxo ViGEm.
-            if (IsPhysicalBlockTarget(symLink)) {
-                ProcessPhysicalBlockDevice(symLink);
-                lock (_lock) { _done.Add(symLink); }
-                return 0;
-            }
 
             lock (_lock) {
                 if (_done.Contains(symLink)) return 0;
@@ -765,11 +1083,123 @@ class DuoGamepadIsolator : ServiceBase {
             string instancePath = SymLinkToInstancePath(symLink);
             uint devInst;
             if (CM_Locate_DevNodeW(out devInst, instancePath, 0) != 0) return 0;
-            if (!IsViGEmDevice(devInst)) return 0;
+
+            // IMPORTANTE: verificar ViGEm ANTES de physical block.
+            // O ViGEmBus emula controles Xbox (VID_045E&PID_028E) e DS4 (VID_054C&PID_05C4).
+            // Se verificarmos physical primeiro, o virtual seria tratado como fisico — sem
+            // CM_Disable preemptivo, sem reciclo, e sem delayed unhide. Isso deixa a
+            // janela de race condition aberta para a Steam.
+            bool isVigem = IsViGEmDevice(devInst);
+            bool isPhysical = IsPhysicalBlockTarget(symLink);
+
+            if (isVigem) {
+                // Virtual ViGEm: processa com protecao completa (CM_Disable + DACL + reciclo + delayed unhide)
+            } else if (isPhysical) {
+                // Fisico real redirecionado via RDP: bloqueia via HidHide apenas
+                ProcessPhysicalBlockDevice(symLink);
+                lock (_lock) { _done.Add(symLink); }
+                return 0;
+            } else {
+                // Nao e ViGEm nem fisico alvo: ignora
+                return 0;
+            }
 
             uint busDevInst = GetViGEmBusChild(devInst);
+
+            // Protecao contra loop infinito: se processamos este symLink nos ultimos 10s,
+            // apenas re-aplica HidHide e ignora o resto.
+            lock (_lock) {
+                DateTime lastProcessed;
+                if (_recentlyProcessed.TryGetValue(symLink, out lastProcessed) && DateTime.Now < lastProcessed.AddSeconds(10)) {
+                    Log("  ARRIVAL: symLink processado ha menos de 10s — ignorando loop.");
+                    return 0;
+                }
+            }
+
+            // Cancela delayed unhide se este device estava agendado para sair da blacklist.
+            // Isso acontece em reconexões rápidas do Moonlight: o device é removido e
+            // recriado dentro dos 30s do pending unhide.
+            string arrivalInstanceId = SymLinkToInstanceId(symLink);
+            bool cancelledPending = false;
+            lock (_lock) {
+                if (_pendingUnhide.Remove(arrivalInstanceId)) {
+                    cancelledPending = true;
+                    Log("  ARRIVAL: cancelado pending unhide para " + arrivalInstanceId);
+                }
+            }
+            if (cancelledPending) {
+                // Reconfirma na blacklist caso tenha sido removido pelo watchdog
+                HidHideAddToBlacklist(arrivalInstanceId);
+            }
+
+            // === ABORDAGEM 3: CM_Disable PREEMPTIVO ===
+            // Desabilita o device no kernel ANTES da Steam ou qualquer app
+            // ter chance de abrir um handle. Isso acontece em ~1ms.
+            // Tenta devInst (HID interface) primeiro — menos provavel de ser vetado que o USB pai.
+            int rcDis1 = CM_Disable_DevNode(devInst, 0);
+            if (rcDis1 != 0) {
+                int rcDis2 = CM_Disable_DevNode(busDevInst, 0);
+                Log("  CM_Disable: HID=" + rcDis1 + " USB=" + rcDis2 + " (0=OK)");
+            } else {
+                Log("  CM_Disable: HID OK (0)");
+            }
+
             ProcessDevice(symLink, devInst, busDevInst);
         } catch (Exception ex) { Log("ERRO callback: " + ex.Message); }
+        return 0;
+    }
+
+    // =====================================================================
+    // Callback XUSB — bloqueio preemptivo do device XInput
+    // =====================================================================
+    int OnXusbEvent(IntPtr hNotify, IntPtr Context, int Action, IntPtr EventData, int EventDataSize) {
+        try {
+            if (EventData == IntPtr.Zero) return 0;
+            string symLink = Marshal.PtrToStringUni(new IntPtr(EventData.ToInt64() + 24));
+            if (string.IsNullOrEmpty(symLink)) return 0;
+
+            // XUSB ARRIVAL: bloqueia na blacklist + desabilita no kernel
+            if (Action == CM_NOTIFY_ACTION_DEVICEINTERFACEARRIVAL) {
+                string instanceId = SymLinkToInstanceId(symLink);
+                // Verifica se ja foi processado recentemente (anti-loop)
+                lock (_lock) {
+                    DateTime lastProcessed;
+                    if (_recentlyProcessed.TryGetValue(symLink, out lastProcessed) && DateTime.Now < lastProcessed.AddSeconds(10)) {
+                        return 0;
+                    }
+                    _recentlyProcessed[symLink] = DateTime.Now;
+                }
+
+                // 1. HidHide blacklist (bloqueio de aplicacao)
+                if (_hidHideAvailable) {
+                    lock (_lock) { _hiddenDevices.Add(instanceId); }
+                    HidHideAddToBlacklist(instanceId);
+                    AddToPersistentXusbBlacklist(instanceId);
+                }
+
+                // 2. CM_Disable no kernel (bloqueio de kernel — impede XInput polling)
+                // Isso desabilita o device antes da Steam ter chance de detectar.
+                string xusbInstancePath = SymLinkToInstancePath(symLink);
+                uint xusbDevInst;
+                if (CM_Locate_DevNodeW(out xusbDevInst, xusbInstancePath, 0) == 0) {
+                    int rcDis = CM_Disable_DevNode(xusbDevInst, 0);
+                    lock (_lock) { _disabledXusbDevices.Add(xusbDevInst); }
+                    Log("XUSB ARRIVAL: XInput bloqueado (HidHide+CM_Disable, devInst=" + xusbDevInst + ", rc=" + rcDis + ")");
+                } else {
+                    Log("XUSB ARRIVAL: XInput bloqueado (HidHide apenas, devInst nao localizado)");
+                }
+            }
+            // XUSB REMOVAL: NUNCA remove da blacklist.
+            // O XUSB do ViGEmBus usa InstanceId FIXO (ex: USB\VID_045E&PID_028E\01).
+            // Se mantivermos na blacklist permanentemente, quando o Moonlight reconecta
+            // e recria o XUSB com o mesmo ID, ele ja esta bloqueado antes do callback.
+            // O HidHide ignora IDs inexistentes na lista sem problemas.
+            else if (Action == CM_NOTIFY_ACTION_DEVICEINTERFACEREMOVAL) {
+                string instanceId = SymLinkToInstanceId(symLink);
+                lock (_lock) { _done.Remove(symLink); }
+                Log("XUSB REMOVAL: XInput MANTIDO na blacklist permanentemente (" + instanceId + ")");
+            }
+        } catch (Exception ex) { Log("ERRO XUSB callback: " + ex.Message); }
         return 0;
     }
 
@@ -810,8 +1240,8 @@ class DuoGamepadIsolator : ServiceBase {
         var guid = HID_GUID;
         IntPtr devs = SetupDiGetClassDevs(
             ref guid, IntPtr.Zero, IntPtr.Zero, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
-        if (devs == new IntPtr(-1)) return;
-        int countAll = 0, countVigem = 0, countProcessed = 0;
+        if (devs == new IntPtr(-1)) { Log("  Scan HID: SetupDiGetClassDevs falhou."); return; }
+        int countAll = 0, countVigem = 0, countProcessed = 0, countNullPath = 0;
         try {
             uint idx = 0;
             while (true) {
@@ -824,8 +1254,9 @@ class DuoGamepadIsolator : ServiceBase {
                     cbSize = (uint)Marshal.SizeOf(typeof(SP_DEVINFO_DATA))
                 };
                 string path = GetDevicePath(devs, ref iface, ref devInfo);
-                if (path == null) continue;
+                if (path == null) { countNullPath++; continue; }
                 countAll++;
+                Log("  Scan HID enum: " + path + " | devInst=" + devInfo.DevInst);
 
                 lock (_lock) { if (_done.Contains(path)) continue; }
 
@@ -837,7 +1268,9 @@ class DuoGamepadIsolator : ServiceBase {
                     continue;
                 }
 
-                if (!IsViGEmDevice(devInfo.DevInst)) continue;
+                bool isVigem = IsViGEmDevice(devInfo.DevInst);
+                Log("  Scan HID: " + path + " | IsViGEmDevice=" + isVigem);
+                if (!isVigem) continue;
                 countVigem++;
 
                 uint busDevInst = GetViGEmBusChild(devInfo.DevInst);
@@ -845,7 +1278,7 @@ class DuoGamepadIsolator : ServiceBase {
                 ProcessDevice(path, devInfo.DevInst, busDevInst);
                 countProcessed++;
             }
-            Log("  Scan HID: " + countAll + " presentes, " + countVigem + " ViGEm, " + countProcessed + " processados novos.");
+            Log("  Scan HID: " + countAll + " presentes, " + countNullPath + " nullPath, " + countVigem + " ViGEm, " + countProcessed + " processados novos.");
         } finally { SetupDiDestroyDeviceInfoList(devs); }
     }
 
@@ -853,17 +1286,16 @@ class DuoGamepadIsolator : ServiceBase {
         uint needed = 0;
         var tmp = new SP_DEVINFO_DATA { cbSize = (uint)Marshal.SizeOf(typeof(SP_DEVINFO_DATA)) };
         SetupDiGetDeviceInterfaceDetail(devs, ref iface, IntPtr.Zero, 0, out needed, ref tmp);
-        if (needed < 5) return null;
+        if (needed < 8) return null;
 
-        uint bufSize = needed + 32;
-        IntPtr buf = Marshal.AllocHGlobal((int)bufSize);
+        IntPtr buf = Marshal.AllocHGlobal((int)needed);
         try {
-            Marshal.WriteInt32(buf, IntPtr.Size == 8 ? 8 : 6);
-            if (!SetupDiGetDeviceInterfaceDetail(devs, ref iface, buf, bufSize, out needed, ref devInfo))
+            // x64 nativo: cbSize=8 (DWORD 4 + padding 4). x86: cbSize=6 (DWORD 4 + WCHAR 2).
+            int cbSize = IntPtr.Size == 8 ? 8 : 6;
+            Marshal.WriteInt32(buf, cbSize);
+            if (!SetupDiGetDeviceInterfaceDetail(devs, ref iface, buf, needed, out needed, ref devInfo))
                 return null;
-            string path = Marshal.PtrToStringUni(new IntPtr(buf.ToInt64() + 4));
-            if (path == null || !path.StartsWith(@"\\?\")) return null;
-            return path;
+            return Marshal.PtrToStringUni(new IntPtr(buf.ToInt64() + 4));
         } finally { Marshal.FreeHGlobal(buf); }
     }
 
@@ -909,6 +1341,15 @@ class DuoGamepadIsolator : ServiceBase {
         string instanceId = SymLinkToInstanceId(devicePath);
         string usbParentId = GetDeviceId(busDevInst);
 
+        // Bloqueio 2b: XUSB/XInput — o ViGEmBus cria um device XInput separado
+        // que a Steam detecta. Precisamos bloquear ele tambem.
+        string xusbId = FindXusbDevice(instanceId);
+        if (!string.IsNullOrEmpty(xusbId)) {
+            lock (_lock) { _hiddenDevices.Add(xusbId); }
+            HidHideAddToBlacklist(xusbId);
+            Log("  HidHide: XUSB/XInput ocultado (" + xusbId + ")");
+        }
+
         if (_hidHideAvailable) {
             lock (_lock) {
                 if (_hiddenDevices.Add(instanceId)) {
@@ -939,14 +1380,39 @@ class DuoGamepadIsolator : ServiceBase {
                 if (!string.IsNullOrEmpty(usbParentId)) _recyclingDevices.Add(usbParentId);
             }
 
-            Log("  Reciclando device (disable+enable) para fechar handles existentes...");
-            int rcDis = CM_Disable_DevNode(busDevInst, 0);
-            Thread.Sleep(400);
-            int rcEna = CM_Enable_DevNode(busDevInst, 0);
-            Log("  Reciclo: Disable=" + rcDis + " Enable=" + rcEna +
-                (rcDis == 0 && rcEna == 0 ? " OK" : " AVISO — verifique privilegios"));
+            // Verifica se este device ja foi processado recentemente (< 60s).
+            // Se for primeira vez (device acabado de criar), nao ha handles abertos
+            // para fechar — podemos usar o fast path (10ms) em vez do reciclo completo (400ms).
+            bool isRecentReconnect = false;
+            lock (_lock) {
+                DateTime lastProcessed;
+                if (_recentlyProcessed.TryGetValue(devicePath, out lastProcessed)) {
+                    isRecentReconnect = DateTime.Now < lastProcessed.AddSeconds(60);
+                }
+            }
 
-                // Re-aplica HidHide blacklist ANTES de limpar _recyclingDevices.
+            if (isRecentReconnect) {
+                Log("  Reciclo FAST (10ms): device processado ha menos de 60s — sem handles para fechar.");
+            } else {
+                Log("  Reciclo FULL: device novo ou inativo > 60s — fechando handles existentes...");
+            }
+
+            // Tenta devInst (HID) primeiro — menos provavel de ser vetado.
+            int rcDis = (int)CM_Disable_DevNode(devInst, 0);
+            uint targetForEnable = devInst;
+            if (rcDis != 0) {
+                rcDis = (int)CM_Disable_DevNode(busDevInst, 0);
+                targetForEnable = busDevInst;
+            }
+            // Fast path: 10ms se device acabado de criar; Full path: 50ms se reconexao
+            Thread.Sleep(isRecentReconnect ? 10 : 50);
+            int rcEna = (int)CM_Enable_DevNode(targetForEnable, 0);
+            bool recycleOk = (rcDis == 0 && rcEna == 0);
+            Log("  Reciclo: Disable=" + rcDis + " Enable=" + rcEna +
+                (recycleOk ? " OK" : " AVISO — verifique privilegios") +
+                (isRecentReconnect ? " (FAST)" : " (FULL)"));
+
+            // Re-aplica HidHide blacklist ANTES de limpar _recyclingDevices.
             // Isso protege contra callbacks REMOVAL tardios do CM_Disable que chegam
             // depois do CM_Enable — eles veriam _recyclingDevices vazio e removeriam
             // da blacklist prematuramente.
@@ -962,6 +1428,20 @@ class DuoGamepadIsolator : ServiceBase {
                 }
             }
 
+            // Notifica todos os aplicativos (Steam, etc.) para reenumerar dispositivos.
+            // Isso evita que apps ja abertos "cacheiem" o controle virtual antes do HidHide.
+            NotifyDeviceChange();
+            Log("  Notificacao WM_DEVICECHANGE enviada para reenumeracao.");
+
+            // So re-enumeracao se o reciclo funcionou. Se falhou (veto), a re-enumeracao
+            // pode causar cascata de callbacks REMOVAL/ARRIVAL que dispara loop infinito.
+            if (recycleOk) {
+                int rcReEnum = CM_Reenumerate_DevNode(busDevInst, CM_REENUMERATE_NORMAL);
+                Log("  Re-enumeracao forçada do device (rc=" + rcReEnum + ").");
+            } else {
+                Log("  Re-enumeracao PULADA (reciclo falhou — evita loop infinito).");
+            }
+
             // Mantém a flag de reciclo por mais 2s após o Enable para absorver
             // callbacks REMOVAL tardios que o CM_Disable/Enable dispara.
             // Durante esse período, qualquer REMOVAL desse device é ignorado.
@@ -974,6 +1454,12 @@ class DuoGamepadIsolator : ServiceBase {
                     if (!string.IsNullOrEmpty(_usbParentId)) _recyclingDevices.Remove(_usbParentId);
                 }
             }) { IsBackground = true, Name = "RecycleCleanup" }.Start();
+
+        }
+
+        // Registra que este device foi processado agora (protecao contra loop infinito)
+        lock (_lock) {
+            _recentlyProcessed[devicePath] = DateTime.Now;
         }
     }
 
@@ -995,6 +1481,46 @@ class DuoGamepadIsolator : ServiceBase {
         return devInst;
     }
 
+    // Procura um device XUSB/XInput correspondente ao HID ViGEm.
+    // O ViGEmBus cria dois devices: um HID e um XUSB. A Steam detecta via XInput,
+    // entao precisamos bloquear ambos.
+    string FindXusbDevice(string hidInstanceId) {
+        try {
+            // Extrai VID e PID do instanceId HID
+            int vidIdx = hidInstanceId.IndexOf("VID_", StringComparison.OrdinalIgnoreCase);
+            int pidIdx = hidInstanceId.IndexOf("PID_", StringComparison.OrdinalIgnoreCase);
+            if (vidIdx < 0 || pidIdx < 0) return null;
+            string vid = hidInstanceId.Substring(vidIdx, 8); // VID_XXXX
+            string pid = hidInstanceId.Substring(pidIdx, 8); // PID_XXXX
+
+            var guid = XUSB_GUID;
+            IntPtr devs = SetupDiGetClassDevs(
+                ref guid, IntPtr.Zero, IntPtr.Zero, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+            if (devs == new IntPtr(-1)) return null;
+            try {
+                uint idx = 0;
+                while (true) {
+                    var iface = new SP_DEVICE_INTERFACE_DATA {
+                        cbSize = (uint)Marshal.SizeOf(typeof(SP_DEVICE_INTERFACE_DATA))
+                    };
+                    if (!SetupDiEnumDeviceInterfaces(devs, IntPtr.Zero, ref guid, idx, ref iface)) break;
+                    idx++;
+                    var devInfo = new SP_DEVINFO_DATA {
+                        cbSize = (uint)Marshal.SizeOf(typeof(SP_DEVINFO_DATA))
+                    };
+                    string path = GetDevicePath(devs, ref iface, ref devInfo);
+                    if (path == null) continue;
+                    // Verifica se o path XUSB contem o mesmo VID/PID
+                    if (path.IndexOf(vid, StringComparison.OrdinalIgnoreCase) >= 0 &&
+                        path.IndexOf(pid, StringComparison.OrdinalIgnoreCase) >= 0) {
+                        return GetDeviceId(devInfo.DevInst);
+                    }
+                }
+            } finally { SetupDiDestroyDeviceInfoList(devs); }
+        } catch (Exception ex) { Log("  FindXusbDevice erro: " + ex.Message); }
+        return null;
+    }
+
     SecurityIdentifier GetConsoleUserSid() {
         uint sessionId = WTSGetActiveConsoleSessionId();
         if (sessionId == 0xFFFFFFFF) return null;
@@ -1013,6 +1539,13 @@ class DuoGamepadIsolator : ServiceBase {
         } finally {
             if (pBuf != IntPtr.Zero) WTSFreeMemory(pBuf);
         }
+    }
+
+    bool IsDevicePresent(string instanceId) {
+        try {
+            uint devInst;
+            return CM_Locate_DevNodeW(out devInst, instanceId, 0) == 0;
+        } catch { return false; }
     }
 
     static string SymLinkToInstancePath(string symLink) {
@@ -1072,6 +1605,7 @@ class DuoGamepadIsolator : ServiceBase {
                 }
             }
         }
+
     }
 
     bool IsViGEmDevice(uint devInst) {
@@ -1195,7 +1729,7 @@ class DuoGamepadIsolator : ServiceBase {
     // =====================================================================
 
     static void Log(string msg) {
-        string line = "[" + DateTime.Now.ToString("HH:mm:ss.fff") + "] " + msg;
+        string line = "[" + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + "] " + msg;
         Console.WriteLine(line);
         try { File.AppendAllText(LOG_PATH, line + Environment.NewLine); } catch { }
     }
@@ -1211,14 +1745,53 @@ class DuoGamepadIsolator : ServiceBase {
         } catch { }
     }
 
+    // Rotação por tempo: mantém apenas linhas dos últimos N dias.
+    // O formato esperado é [yyyy-MM-dd HH:mm:ss.fff] no início da linha.
+    static void TruncateLogByTime(int days = 2) {
+        try {
+            if (!File.Exists(LOG_PATH)) return;
+            string[] lines = File.ReadAllLines(LOG_PATH);
+            if (lines.Length == 0) return;
+            DateTime cutoff = DateTime.Now.AddDays(-days);
+            var keep = new List<string>();
+            foreach (var line in lines) {
+                if (line.Length < 24) { keep.Add(line); continue; } // sem data, mantém por segurança
+                if (line[0] != '[') { keep.Add(line); continue; }
+                DateTime dt;
+                if (DateTime.TryParseExact(line.Substring(1, 19), "yyyy-MM-dd HH:mm:ss",
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.None, out dt)) {
+                    if (dt >= cutoff) keep.Add(line);
+                } else {
+                    keep.Add(line); // não conseguiu parse, mantém
+                }
+            }
+            if (keep.Count < lines.Length) {
+                File.WriteAllLines(LOG_PATH, keep);
+                Log("LOG_ROTATOR: " + (lines.Length - keep.Count) + " linhas antigas removidas (mantendo ultimos " + days + " dias).");
+            }
+        } catch { }
+    }
+
+    void LogRotatorLoop() {
+        while (_running) {
+            for (int i = 0; i < 3600 && _running; i++) Thread.Sleep(1000); // a cada 1h
+            if (!_running) break;
+            TruncateLogByTime(2);
+        }
+    }
+
     // =====================================================================
     // Instalação / remoção
     // =====================================================================
 
     static void Install() {
         string exe = System.Reflection.Assembly.GetExecutingAssembly().Location;
-        Exec("sc.exe", "create " + SERVICE_NAME +
-            " binPath= \"" + exe + "\" start= auto DisplayName= \"Duo Gamepad Isolator\"");
+        // sc.exe exige aspas escapadas com \ quando o binPath tem espaços.
+        // Separamos create, displayname e description em comandos distintos para evitar
+        // parsing errors do sc.exe quando o path contém espaço.
+        Exec("sc.exe", "create " + SERVICE_NAME + " binPath= \"\\\"" + exe + "\\\"\" start= auto");
+        Exec("sc.exe", "config " + SERVICE_NAME + " DisplayName= \"Duo Gamepad Isolator\"");
         Exec("sc.exe", "description " + SERVICE_NAME +
             " \"Isola controles virtuais ViGEmBus para a sessao de streaming ativa\"");
         Exec("sc.exe", "failure " + SERVICE_NAME + " reset= 86400 actions= restart/5000/restart/10000/restart/30000");
