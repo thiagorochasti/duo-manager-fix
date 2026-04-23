@@ -220,6 +220,95 @@ class DuoRdpWrapper {
         return false;
     }
 
+    // Reads fallback_resolution from duo_wrapper.conf — used when IddCx fails or logs are empty.
+    static bool TryReadFallbackResolution(string duoDir, out int width, out int height) {
+        width = 0; height = 0;
+        string confPath = Path.Combine(duoDir, "config", "duo_wrapper.conf");
+        if (!File.Exists(confPath)) return false;
+        try {
+            foreach (string line in File.ReadAllLines(confPath)) {
+                string trimmed = line.Trim();
+                if (!trimmed.StartsWith("fallback_resolution", StringComparison.OrdinalIgnoreCase)) continue;
+                int eq = trimmed.IndexOf('=');
+                if (eq < 0) continue;
+                string val = trimmed.Substring(eq + 1).Trim();
+                Match m = Regex.Match(val, @"^(\d+)\s*[xX]\s*(\d+)$");
+                if (!m.Success) continue;
+                width  = int.Parse(m.Groups[1].Value);
+                height = int.Parse(m.Groups[2].Value);
+                return width > 0 && height > 0;
+            }
+        } catch { }
+        return false;
+    }
+
+    // Reads last_known_resolution from duo_wrapper.conf — cached from previous successful session.
+    static bool TryReadLastKnownResolution(string duoDir, out int width, out int height) {
+        width = 0; height = 0;
+        string confPath = Path.Combine(duoDir, "config", "duo_wrapper.conf");
+        if (!File.Exists(confPath)) return false;
+        try {
+            foreach (string line in File.ReadAllLines(confPath)) {
+                string trimmed = line.Trim();
+                if (!trimmed.StartsWith("last_known_resolution", StringComparison.OrdinalIgnoreCase)) continue;
+                int eq = trimmed.IndexOf('=');
+                if (eq < 0) continue;
+                string val = trimmed.Substring(eq + 1).Trim();
+                Match m = Regex.Match(val, @"^(\d+)\s*[xX]\s*(\d+)$");
+                if (!m.Success) continue;
+                width  = int.Parse(m.Groups[1].Value);
+                height = int.Parse(m.Groups[2].Value);
+                return width > 0 && height > 0;
+            }
+        } catch { }
+        return false;
+    }
+
+    // Saves last_known_resolution to duo_wrapper.conf for faster reconnections.
+    static void SaveLastKnownResolution(string duoDir, int width, int height) {
+        string confPath = Path.Combine(duoDir, "config", "duo_wrapper.conf");
+        try {
+            var lines = new List<string>();
+            bool replaced = false;
+            if (File.Exists(confPath)) {
+                foreach (string line in File.ReadAllLines(confPath)) {
+                    if (line.Trim().StartsWith("last_known_resolution", StringComparison.OrdinalIgnoreCase)) {
+                        lines.Add("last_known_resolution = " + width + "x" + height);
+                        replaced = true;
+                    } else {
+                        lines.Add(line);
+                    }
+                }
+            }
+            if (!replaced) lines.Add("last_known_resolution = " + width + "x" + height);
+            File.WriteAllLines(confPath, lines.ToArray());
+        } catch { }
+    }
+
+    // Removes dd_resolution_option and dd_manual_resolution from the active conf so
+    // Sunshine does not lock the virtual display to a stale resolution while we poll.
+    // This fixes the v1.0.10 regression where residual 640x480 caused IddCx to lock
+    // before the wrapper could detect the real Moonlight resolution.
+    static void ClearDisplayResolutionLock(string duoDir) {
+        string confPath = GetConfPath(duoDir);
+        if (confPath == null || !File.Exists(confPath)) return;
+        try {
+            string[] lines = File.ReadAllLines(confPath);
+            bool changed = false;
+            var kept = new List<string>(lines.Length);
+            foreach (string line in lines) {
+                string t = line.Trim();
+                if (t.StartsWith("dd_resolution_option", StringComparison.OrdinalIgnoreCase) ||
+                    t.StartsWith("dd_manual_resolution", StringComparison.OrdinalIgnoreCase)) {
+                    changed = true;
+                    continue;
+                }
+                kept.Add(line);
+            }
+            if (changed) File.WriteAllLines(confPath, kept.ToArray());
+        } catch { }
+    }
+
     static bool TryReadSunshineEnvResolution(out int width, out int height) {
         width  = 0;
         height = 0;
@@ -612,6 +701,12 @@ class DuoRdpWrapper {
             for (int i = 0; i < args.Length; i++)
                 Log(logPath, "  [" + i + "] = " + args[i]);
 
+            // CRITICAL FIX: Remove stale dd_manual_resolution before any polling.
+            // In v1.0.10 this cleanup was removed, causing IddCx to lock at 640x480
+            // while the wrapper waited for Sunshine logs. This restores v1.0.9 behavior.
+            ClearDisplayResolutionLock(duoDir);
+            Log(logPath, "  => ClearDisplayResolutionLock executed (stale 640x480 removed if present).");
+
             // Start the HID Jailer thread to isolate controllers created by official Sunshine
             // args[2] = username in DuoManagerService mode; fallback to Environment.UserName
             string rdpUser = (args.Length >= 3 && !string.IsNullOrEmpty(args[2]))
@@ -671,11 +766,18 @@ class DuoRdpWrapper {
                 else if (TryReadWrapperConfig(duoDir, out rW, out rH)) { targetW = rW; targetH = rH; resSource = "duo_wrapper.conf"; }
                 else if (TryReadMoonlightResolution(duoDir, out rW, out rH)) { targetW = rW; targetH = rH; resSource = "Games.log"; }
                 else if (TryReadApolloResolution(duoDir, out rW, out rH)) { targetW = rW; targetH = rH; resSource = "Apollo config"; }
+                else if (TryReadLastKnownResolution(duoDir, out rW, out rH)) { targetW = rW; targetH = rH; resSource = "last_known_resolution"; }
+                else if (TryReadFallbackResolution(duoDir, out rW, out rH)) { targetW = rW; targetH = rH; resSource = "fallback_resolution"; }
 
                 SetDisplayResolution(duoDir, targetW, targetH);
                 newArgs[5] = targetW.ToString();
                 newArgs[6] = targetH.ToString();
                 currentW = targetW; currentH = targetH;
+
+                // Cache successful resolution for next session
+                if (targetW > 0 && targetH > 0 && targetW != 640 && targetH != 480) {
+                    SaveLastKnownResolution(duoDir, targetW, targetH);
+                }
 
                 Log(logPath, "  => Resolution resolved: " + targetW + "x" + targetH + " [" + (resSource ?? "Duo default") + "]");
             }
