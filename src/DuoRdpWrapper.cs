@@ -756,7 +756,9 @@ class DuoRdpWrapper {
                 string resSource = null;
 
                 int rW, rH;
-                DateTime waitUntil = DateTime.Now.AddSeconds(50);
+                // Sunshine may take several minutes to write the first log entry on initial
+                // connection (observed: up to 4 minutes). We poll for 180s before falling back.
+                DateTime waitUntil = DateTime.Now.AddSeconds(180);
                 while (!TryReadMoonlightLaunchResolution(duoDir, out rW, out rH)) {
                     if (DateTime.Now >= waitUntil) break;
                     System.Threading.Thread.Sleep(300);
