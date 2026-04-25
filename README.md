@@ -115,3 +115,15 @@ Do **not** enable Process Patching or set Targeted Applications = All in Duo Man
 
 ## License
 MIT
+
+---
+
+## Support
+
+DuoManagerFix is free and always will be. If it has helped your setup, consider supporting so development can continue — more time means faster fixes and new features like proper multi-session support.
+
+[![Support on Patreon](https://img.shields.io/badge/Support-Patreon-orange?logo=patreon)](https://www.patreon.com/thiagorochasti)
+
+**Supporter tier — $3/month** (you can set any amount above the minimum)
+
+Every contribution helps keep this project alive and lets me tackle the issues the community brings. Thank you.
