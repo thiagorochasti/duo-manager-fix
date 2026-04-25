@@ -1,4 +1,4 @@
-—# Duo Manager Fix
+——# Duo Manager Fix
 
 The ultimate community patch for **[Duo Manager 1.5.6](https://github.com/DuoStream/Duo/releases/tag/v1.5.6)**. This fix resolves critical issues that appear on recent Windows 11 builds with NVIDIA RTX GPUs and [Moonlight](https://moonlight-stream.org/) streaming.
 
@@ -127,3 +127,6 @@ DuoManagerFix is free and always will be. If it has helped your setup, consider 
 **Supporter tier — $3/month** (you can set any amount above the minimum)
 
 Every contribution helps keep this project alive and lets me tackle the issues the community brings. Thank you.
+
+**Why your support matters more than you think:**
+A significant part of this work is powered by AI — we currently pay out of pocket for 3 different LLMs to investigate bugs, analyze logs, and assist with fixes. We've already hit our usage quotas, which slows everything down. With more support, we can upgrade to more robust plans and keep the work running without interruptions — including automating issue investigation and patch validation so nothing gets stuck waiting.
