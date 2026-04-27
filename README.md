@@ -1,113 +1,43 @@
 # Duo Manager Fix
 
-The ultimate community patch for **[Duo Manager 1.5.6](https://github.com/DuoStream/Duo/releases/tag/v1.5.6)**. This fix resolves critical issues that appear on recent Windows 11 builds with NVIDIA RTX GPUs and [Moonlight](https://moonlight-stream.org/) streaming.
+The ultimate community patch for **[Duo Manager 1.5.6](https://github.com/DuoStream/Duo/releases/tag/v1.5.6)**. This fix resolves critical issues that appear on recent Windows 11 builds with NVIDIA RTX GPUs and [Moonlight](https://moonlight-stream.org/).
 
-> **Symptoms Fixed:** Moonlight fails to connect immediately, sessions stuck at 640×480, management UI showing a black/blank screen, 4K host overload during first connection, audio routing to the wrong device, or gamepads bleeding into the host session.
+## 🌟 What's New in v1.0.11-beta
 
----
+This version introduces **Smart Resolution Sync** and **Proactive Gamepad Isolation**, making Duo Manager stable for competitive and multi-user environments.
 
-## Quick Install (v1.0.11)
+### 🛡️ Kernel-Level Gamepad Isolation
+- **No Steam Bleeding:** The controller is hidden at the Kernel level using DACL (Security Descriptors) and HidHide Filters before it's even created.
+- **Console Logon Protection (SID S-1-2-1):** Blocks any process running on the physical monitor (like Steam) from seeing the virtual controller while allowing full access for the remote session.
 
-1. Ensure **[Duo Manager 1.5.6](https://github.com/DuoStream/Duo/releases/tag/v1.5.6)** is installed.
-2. Ensure **[ViGEmBus](https://github.com/nefarius/ViGEmBus/releases/latest)** is installed.
-3. Download **[DuoManagerFix-Setup.exe](https://github.com/thiagorochasti/duo-manager-fix/releases/latest)**.
-4. Run the installer (it automatically requests Admin privileges).
-5. Choose your engine (**Apollo** for stability, **Sunshine** for experimental feature support).
-6. Connect from Moonlight and enjoy!
+### 🖥️ Smart Resolution & Persistence
+- **Crystal Clear Image:** Automatic rounding to multiple-of-4 width (e.g., 1366 becomes 1368) to satisfy the RDP protocol and prevent blur.
+- **Smart Sync:** 
+  - **Same resolution:** Instant reconnect, game continues.
+  - **Different resolution:** Automatic logoff and physical monitor resize (takes ~2 seconds).
+- **Why logoff?** Due to Windows IddCx driver limitations, a virtual monitor can only physically change its dimensions when the user session is re-initialized.
 
----
-
-## What it fixes
-
-### 1 — Streaming server crashes (Apollo Engine)
-On recent Windows 11 builds, the original `sunshine.exe` bundled with Duo Manager often enters a crash loop.
-**Fix:** The installer replaces it with a specialized version from **Apollo 0.4.6**, ensuring stable connections and proper NVENC encoding on RTX cards.
-
-### 2 — Resolution stuck at 640×480 (real-time, no restart needed)
-Duo Manager hardcodes `640×480` into its internal RDP component and ignores the resolution Moonlight actually requested.
-
-**Fix:** Our **DuoRdpWrapper** intercepts these arguments and passes the correct resolution to the RDP client. It reads the exact resolution from the Apollo/Sunshine debug log and updates in real-time — when you change resolution in Moonlight and reconnect, the wrapper detects it automatically and restarts the RDP session at the new resolution **without restarting Duo Manager Service**.
-
-> **Requirement:** Set `min_log_level = debug` in your Apollo/Sunshine config (`localhost:47990 → Configuration → General`) for the best resolution detection accuracy.
-
-### 3 — Web management UI blank
-The management page (`https://YOUR_PC:62203`) often appears blank because of outdated Vue.js assets.
-**Fix:** The installer replaces the web assets with up-to-date files matching the engine you selected.
-
-### 4 — Dual Engine Support
-During installation, you can choose:
-- **Apollo 0.4.6:** Recommended for 99% of users. Solid stability and performance.
-- **Sunshine Native:** Best for users testing new HID features or specific controller drivers.
-
-### 5 — Auto-Admin Installer
-No more "Run as Administrator" right-click requirement. The installer handles elevation automatically to ensure every patch is applied correctly.
-
-### 6 — Gamepad bleeding into host session (v1.0.11+)
-When using Moonlight with a controller, the virtual gamepad created by ViGEmBus was visible to the host Windows session — causing Steam, games and other apps on the host to detect and react to inputs meant only for the remote session.
-
-**Fix (v1.0.11 — Proactive Isolation):** The `DuoGamepadIsolator` service now uses a **three-layer defense** that eliminates the race condition entirely:
-
-1. **Pre-Creation Blacklist** — Before any connection occurs, 64+ predictable XUSB Instance IDs (Xbox 360/One/Series, DS4, DualSense) are injected into the HidHide blacklist. When ViGEmBus creates a virtual controller, it is **already hidden** (0ms window).
-2. **Kernel-Level Disable** — A dedicated kernel callback (`CM_Register_Notification` for `GUID_DEVINTERFACE_XUSB`) immediately disables the XUSB device via `CM_Disable_DevNode`, making it invisible to XInput polling before Steam can detect it. Fully reversible on service stop.
-3. **Persistent XUSB Blacklist** — Discovered XUSB IDs are saved to `C:\ProgramData\DuoFix\xusb_blacklist.dat` and automatically re-blocked on service restart, surviving Windows reboots.
-
-Additional protections include a **50ms watchdog** that detects and re-hides any leaked devices, **delayed unhide (30s)** to absorb rapid reconnections, and **adaptive recycling** (10ms fast path / 50ms full path) with `WM_DEVICECHANGE` broadcast to force Steam re-enumeration.
-
-> **Important:** Do **not** enable the HID Isolation option inside Duo Manager — this fix handles isolation automatically and the two mechanisms can conflict.
-
-> **Important:** Do **not** enable the HID Isolation option inside Duo Manager — this fix handles isolation automatically and the two mechanisms can conflict.
-
-### 7 — Audio routed to wrong device / no audio (Duo 1.5.6 only)
-`Duo.exe` hardcodes `virtual_sink = Remote Audio` internally and injects it into the Apollo/Sunshine config on every launch, silently overriding whatever audio sink you configured.
-
-**Fix:** The installer patches `Duo.exe` (Duo 1.5.6 only) to remove this hardcoded override, letting Apollo/Sunshine use the audio sink you actually configured.
-
-> If after installing you lose audio, set the value manually: open `localhost:47990 → Configuration → Audio/Video → Virtual Sink → Remote Audio` and restart the service.
+### 🧹 Automatic Cleanup
+- **No Ghost Sessions:** Native `logoff.exe` is called when the service stops or resolution changes, ensuring no disconnected "Games" users are left in memory.
+- **Fast Startup:** Reduced log polling timeout from 180s to 15s.
 
 ---
 
-## Verifying the fix
+## 🚀 Installation
 
-After connecting from Moonlight, check `C:\Users\Public\duordp_args.txt`:
-
-**Resolution correctly applied:**
-```
-=> Duo sent 640x480. Overriding with 2560x1440 [Moonlight (GET /launch mode=)]
-=> Calling: C:\Program Files\Duo\DuoRdp_orig.exe "127.0.0.1" ... "2560" "1440"
-```
-
-**Real-time resolution change detected:**
-```
-=== Resolution change detected: 1920x1080 -> 2560x1440. Restarting DuoRdp_orig.exe.
-=> Calling: C:\Program Files\Duo\DuoRdp_orig.exe "127.0.0.1" ... "2560" "1440"
-```
+1. Download the latest release: `release/DuoManagerFix-Setup.exe`.
+2. Run the installer as Administrator.
+3. **Reboot your computer** (Required to reset the Virtual Display Driver).
+4. Connect via Moonlight and enjoy!
 
 ---
 
-## Troubleshooting
+## 🛠️ Development & Contributions
 
-**Resolution still wrong?**
-- Confirm `min_log_level = debug` is set in Apollo/Sunshine config.
-- Check `duordp_args.txt` — the log will show which source was used (or why detection failed).
+This project is open-source. If you find a way to dynamically resize the `IddCx` virtual monitor without a full logoff, feel free to contribute!
 
-**No audio / audio on wrong device?**
-- Open `http://localhost:47990 → Configuration → Audio/Video`.
-- Set **Virtual Sink** to `Remote Audio` and restart the service.
-- See also: [#469](https://github.com/DuoStream/Duo/issues/469), [#478](https://github.com/DuoStream/Duo/issues/478).
-
-**Moonlight fails to connect / Black screen**
-- Check the Apollo/Sunshine log in `C:\Program Files\Duo\config\` for encoder errors (the log file name matches your `sunshine_name` setting, e.g. `Games.log`, `cosmo.log`).
-- Ensure GPU drivers are current.
-- Restart the "Duo Manager" service in `services.msc`.
-
-**Apps opening on the host instead of the remote session?**
-Do **not** enable Process Patching or set Targeted Applications = All in Duo Manager → Patch Settings. These options cause known issues on Windows — see [#458](https://github.com/DuoStream/Duo/issues/458) and [#446](https://github.com/DuoStream/Duo/issues/446). Instead, log in as the user on the remote session and open the application manually from within the session.
-
----
-
-## Building from source
-
-1. `git clone https://github.com/thiagorochasti/duo-manager-fix.git`
+### Build from source:
+1. Clone the repo: `git clone https://github.com/thiagorochasti/duo-manager-fix.git`
 2. Run `scripts\build.bat` (Requires .NET 4.x).
 3. Ensure Apollo/Sunshine binaries are in `bundled/`.
 4. Open `installer\setup.iss` in **Inno Setup 6** and compile (F9).

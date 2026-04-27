@@ -2,9 +2,9 @@
 ; Requires Inno Setup 6.x: https://jrsoftware.org/isinfo.php
 ;
 ; Before compiling:
-;   1. Run scripts\build.bat          -> generates bin\DuoRdpWrapper.exe
-;   2. Run scripts\prepare_bundle.bat -> populates bundled\sunshine\
-;   3. Open this file in Inno Setup Compiler and press F9
+;   Run scripts\build_release.bat as Administrator (compiles all binaries,
+;   prepares bundle and calls Inno Setup automatically).
+;   Or manually: build.bat -> prepare_bundle.bat -> F9 here.
 
 #define AppName "Duo Manager Fix"
 #define AppVersion "1.0.11"
@@ -62,6 +62,7 @@ Source: "..\bundled\sunshine\assets\web\*";      DestDir: "{tmp}\web";    Flags:
 Source: "..\bundled\sunshine\assets\*";          DestDir: "{tmp}\sunshine_assets"; Flags: recursesubdirs deleteafterinstall
 Source: "..\bundled\sunshine\scripts\*";         DestDir: "{tmp}\sunshine_scripts"; Flags: recursesubdirs deleteafterinstall
 Source: "..\bundled\sunshine\tools\*";           DestDir: "{tmp}\sunshine_tools";   Flags: recursesubdirs deleteafterinstall
+
 
 [Code]
 
@@ -500,6 +501,20 @@ begin
       False) then
       AbortInstall('App configuration - Games_apps.json',
         'Could not write to ' + DuoDir + '\config\Games_apps.json.',
+        'Check that the config folder exists and is writable.');
+  end;
+
+  // ----------------------------------------------------------
+  // Fix 4.5: duo_wrapper.conf - create default configuration for resolution detection
+  // ----------------------------------------------------------
+  if not FileExists(DuoDir + '\config\duo_wrapper.conf') then begin
+    if not SaveStringToFile(
+      DuoDir + '\config\duo_wrapper.conf',
+      'target_resolution = 2560x1440' + #13#10 +
+      'fallback_resolution = 1920x1080' + #13#10,
+      False) then
+      AbortInstall('App configuration - duo_wrapper.conf',
+        'Could not write to ' + DuoDir + '\config\duo_wrapper.conf.',
         'Check that the config folder exists and is writable.');
   end;
 

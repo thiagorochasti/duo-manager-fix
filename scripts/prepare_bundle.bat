@@ -17,7 +17,7 @@ set APOLLO=C:\Program Files\Apollo
 set SUNSHINE=C:\Program Files\Sunshine\Sunshine
 set OUT=%~dp0..\bundled
 
-echo === Duo Manager Fix — Preparar Bundle (Dual Engine) ===
+echo === Duo Manager Fix -- Preparar Bundle (Dual Engine) ===
 echo.
 
 :: ============================================================
@@ -93,8 +93,8 @@ if %HAS_APOLLO%==0 if %HAS_SUNSHINE%==0 (
 )
 
 echo === Resumo ===
-if %HAS_APOLLO%==1 (echo   [OK] Apollo 0.4.6) else (echo   [--] Apollo nao disponivel)
-if %HAS_SUNSHINE%==1 (echo   [OK] Sunshine nativo) else (echo   [--] Sunshine nao disponivel)
+if %HAS_APOLLO%==1   (echo   [OK] Apollo 0.4.6)      else (echo   [--] Apollo nao disponivel)
+if %HAS_SUNSHINE%==1 (echo   [OK] Sunshine nativo)   else (echo   [--] Sunshine nao disponivel)
 echo.
 echo Bundle pronto em: %OUT%
 echo Agora compile o installer\setup.iss no Inno Setup (F9).

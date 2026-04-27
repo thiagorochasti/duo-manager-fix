@@ -20,9 +20,9 @@ echo.
 :: Criar pasta bin
 if not exist "..\bin" mkdir ..\bin
 
-:: Compilar DuoRdpWrapper
+:: Compilar DuoRdpWrapper (FreeRDP-based — sem AxHost)
 echo [1/1] Compilando DuoRdpWrapper...
-"%CSC%" /out:..\bin\DuoRdpWrapper.exe ..\src\DuoRdpWrapper.cs
+"%CSC%" /r:System.Windows.Forms.dll /out:..\bin\DuoRdpWrapper.exe ..\src\DuoRdpWrapper.cs
 if errorlevel 1 ( echo ERRO: DuoRdpWrapper falhou. & exit /b 1 )
 echo OK: DuoRdpWrapper.exe
 

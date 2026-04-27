@@ -1185,8 +1185,13 @@ class DuoGamepadIsolator : ServiceBase {
                     int rcDis = CM_Disable_DevNode(xusbDevInst, 0);
                     lock (_lock) { _disabledXusbDevices.Add(xusbDevInst); }
                     Log("XUSB ARRIVAL: XInput bloqueado (HidHide+CM_Disable, devInst=" + xusbDevInst + ", rc=" + rcDis + ")");
+                    
+                    if (rcDis != 0) {
+                        lock (_lock) { _recentlyProcessed.Remove(symLink); } // Permite nova tentativa imediata após reciclo
+                    }
                 } else {
                     Log("XUSB ARRIVAL: XInput bloqueado (HidHide apenas, devInst nao localizado)");
+                    lock (_lock) { _recentlyProcessed.Remove(symLink); }
                 }
             }
             // XUSB REMOVAL: NUNCA remove da blacklist.
@@ -1343,8 +1348,16 @@ class DuoGamepadIsolator : ServiceBase {
 
         // Bloqueio 2b: XUSB/XInput — o ViGEmBus cria um device XInput separado
         // que a Steam detecta. Precisamos bloquear ele tambem.
-        string xusbId = FindXusbDevice(instanceId);
-        if (!string.IsNullOrEmpty(xusbId)) {
+        string xusbId = null;
+        var xusbInfo = FindXusbDevice(instanceId);
+        if (xusbInfo != null) {
+            xusbId = xusbInfo.Item1;
+            string xusbPath = xusbInfo.Item2;
+            
+            // Bloqueio DACL ao vivo no XUSB (antes do reciclo)
+            bool okXusb = ApplyDacl(xusbPath, consoleSid);
+            Log("  DACL XUSB (ao vivo): " + (okXusb ? "OK" : "falhou"));
+            
             lock (_lock) { _hiddenDevices.Add(xusbId); }
             HidHideAddToBlacklist(xusbId);
             Log("  HidHide: XUSB/XInput ocultado (" + xusbId + ")");
@@ -1372,6 +1385,10 @@ class DuoGamepadIsolator : ServiceBase {
             // Escreve DACL no registro ANTES do reciclo. Quando CM_Enable re-enumera o device,
             // o driver HID lê o SD do registro → nossa DACL restritiva persiste após o Enable.
             WriteDeviceSecurityToRegistry(instanceId, consoleSid);
+            if (!string.IsNullOrEmpty(xusbId)) {
+                WriteDeviceSecurityToRegistry(xusbId, consoleSid);
+                Log("  WriteRegSec: DACL persistida no registro do XUSB (" + xusbId + ")");
+            }
 
             // Marca devices como "em reciclo" para que a REMOVAL transiente
             // não os remova da blacklist do HidHide
@@ -1397,15 +1414,34 @@ class DuoGamepadIsolator : ServiceBase {
                 Log("  Reciclo FULL: device novo ou inativo > 60s — fechando handles existentes...");
             }
 
-            // Tenta devInst (HID) primeiro — menos provavel de ser vetado.
-            int rcDis = (int)CM_Disable_DevNode(devInst, 0);
-            uint targetForEnable = devInst;
+            // Precisamos derrubar o busDevInst (pai) para forçar o filho XUSB a cair
+            // e forçar o Windows a recarregar a DACL do XUSB do registro no Enable.
+            
+            uint xusbDevInst = 0;
+            if (!string.IsNullOrEmpty(xusbId)) {
+                CM_Locate_DevNodeW(out xusbDevInst, xusbId, 0); // Localiza o nó XUSB pelo ID
+            }
+
+            // Desabilita forçosamente o XUSB node caso ele tenha um handle aberto
+            if (xusbDevInst != 0) {
+                int rcXusbDis = (int)CM_Disable_DevNode(xusbDevInst, 0);
+                Log("  Reciclo: Disable XUSB = " + rcXusbDis);
+            }
+
+            int rcDis = (int)CM_Disable_DevNode(busDevInst, 0);
+            uint targetForEnable = busDevInst;
             if (rcDis != 0) {
-                rcDis = (int)CM_Disable_DevNode(busDevInst, 0);
-                targetForEnable = busDevInst;
+                // Fallback: se o pai for vetado, tenta pelo menos o HID
+                rcDis = (int)CM_Disable_DevNode(devInst, 0);
+                targetForEnable = devInst;
             }
             // Fast path: 10ms se device acabado de criar; Full path: 50ms se reconexao
             Thread.Sleep(isRecentReconnect ? 10 : 50);
+            
+            if (xusbDevInst != 0) {
+                CM_Enable_DevNode(xusbDevInst, 0);
+            }
+            
             int rcEna = (int)CM_Enable_DevNode(targetForEnable, 0);
             bool recycleOk = (rcDis == 0 && rcEna == 0);
             Log("  Reciclo: Disable=" + rcDis + " Enable=" + rcEna +
@@ -1484,7 +1520,7 @@ class DuoGamepadIsolator : ServiceBase {
     // Procura um device XUSB/XInput correspondente ao HID ViGEm.
     // O ViGEmBus cria dois devices: um HID e um XUSB. A Steam detecta via XInput,
     // entao precisamos bloquear ambos.
-    string FindXusbDevice(string hidInstanceId) {
+    Tuple<string, string> FindXusbDevice(string hidInstanceId) {
         try {
             // Extrai VID e PID do instanceId HID
             int vidIdx = hidInstanceId.IndexOf("VID_", StringComparison.OrdinalIgnoreCase);
@@ -1513,7 +1549,7 @@ class DuoGamepadIsolator : ServiceBase {
                     // Verifica se o path XUSB contem o mesmo VID/PID
                     if (path.IndexOf(vid, StringComparison.OrdinalIgnoreCase) >= 0 &&
                         path.IndexOf(pid, StringComparison.OrdinalIgnoreCase) >= 0) {
-                        return GetDeviceId(devInfo.DevInst);
+                        return new Tuple<string, string>(GetDeviceId(devInfo.DevInst), path);
                     }
                 }
             } finally { SetupDiDestroyDeviceInfoList(devs); }
